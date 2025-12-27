@@ -1,0 +1,133 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-lg shadow-sm border border-gray-200 p-6;
+  }
+
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2;
+  }
+
+  .btn-primary {
+    @apply btn bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500;
+  }
+
+  .btn-secondary {
+    @apply btn bg-gray-200 text-gray-900 hover:bg-gray-300 focus:ring-gray-500;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+  }
+
+  .input {
+    @apply w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply badge bg-green-100 text-green-800;
+  }
+
+  .badge-warning {
+    @apply badge bg-yellow-100 text-yellow-800;
+  }
+
+  .badge-error {
+    @apply badge bg-red-100 text-red-800;
+  }
+
+  .badge-info {
+    @apply badge bg-blue-100 text-blue-800;
+  }
+}
+
+/* ReactFlow node styles - remove default black borders */
+/* Target the wrapper that ReactFlow creates - this is the parent container */
+.react-flow__node {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+/* Remove default border from ReactFlow's default node class wrapper */
+/* But allow inline styles to override for our custom content */
+.react-flow__node-default {
+  border: none;
+  outline: none;
+  background: transparent;
+}
+
+/* Dark mode - remove borders from wrapper only */
+.dark .react-flow__node {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.dark .react-flow__node-default {
+  border: none;
+  outline: none;
+}
+
+/* Light mode - remove borders from wrapper only */
+.react-flow:not(.dark) .react-flow__node {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Chat Client Animations */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* Mobile safe area support */
+.safe-area-inset-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+/* Ensure full height on mobile - use dvh units */
+@supports (height: 100dvh) {
+  .h-screen-mobile {
+    height: 100dvh;
+  }
+}
+
+/* Fallback for browsers that don't support dvh */
+@supports not (height: 100dvh) {
+  .h-screen-mobile {
+    height: 100vh;
+  }
+}
+
+/* iOS Safari specific fix */
+@supports (-webkit-touch-callout: none) {
+  .h-screen-mobile {
+    height: -webkit-fill-available;
+  }
+}

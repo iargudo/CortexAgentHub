@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*", "src/types/**/*"],
+  "references": [
+    { "path": "../packages/shared" },
+    { "path": "../packages/core" },
+    { "path": "../packages/mcp-server" },
+    { "path": "../packages/llm-gateway" },
+    { "path": "../packages/channel-adapters" }
+  ]
+}

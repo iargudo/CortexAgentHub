@@ -1,0 +1,25 @@
+{
+  "name": "@cortex/database",
+  "version": "1.0.0",
+  "description": "Database client and repository layer for CortexMCP",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "migrate": "tsx src/migrations/runner.ts",
+    "seed": "tsx src/seeds/runner.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@cortex/shared": "workspace:*",
+    "pg": "^8.12.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.3"
+  }
+}

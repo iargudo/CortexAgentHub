@@ -1,0 +1,37 @@
+{
+  "name": "cortex-agenthub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-channel AI orchestration platform for intelligent agents",
+  "scripts": {
+    "dev": "pnpm --parallel --recursive run dev",
+    "build": "pnpm --recursive run build",
+    "test": "pnpm --recursive run test",
+    "test:unit": "pnpm --recursive run test:unit",
+    "test:integration": "pnpm --recursive run test:integration",
+    "test:e2e": "pnpm --recursive run test:e2e",
+    "lint": "pnpm --recursive run lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/seed.js",
+    "clean": "pnpm --recursive run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "eslint-config-prettier": "^9.0.0",
+    "prettier": "^3.1.0",
+    "typescript": "^5.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "baseline-browser-mapping": "latest"
+    }
+  }
+}
