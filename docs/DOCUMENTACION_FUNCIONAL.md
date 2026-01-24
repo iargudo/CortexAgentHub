@@ -1,7 +1,7 @@
 # 📖 Documentación Funcional - CortexAgentHub
 
-**Versión:** 1.0.0  
-**Última actualización:** Diciembre 2025  
+**Versión:** 1.1.0  
+**Última actualización:** Enero 2026  
 **Audiencia:** Usuarios finales, administradores, stakeholders
 
 ---
@@ -316,6 +316,10 @@ Widgets embebibles personalizables:
 - **Eliminar canal:**
   - Solo si no está asignado a ningún agente
 
+- **Ver/Copiar ID del Canal (Channel Config ID):**
+  - En la lista de canales, el sistema muestra el **ID del canal** (`channel_configs.id`) para facilitar integraciones externas (por ejemplo, seleccionar explícitamente qué canal WhatsApp usar para envíos salientes).
+  - Incluye acción rápida de **copiar al portapapeles**.
+
 **Tipos de canales:**
 
 **WhatsApp:**
@@ -339,6 +343,19 @@ Widgets embebibles personalizables:
 - IMAP para recibir
 
 **Acceso:** `/channels`
+
+### Módulo 2.1: Integraciones Externas (Sistemas terceros)
+
+**Propósito:** Permitir que sistemas externos (CRM/ERP/Collections) aporten contexto y/o soliciten envíos salientes sin depender de una integración “dedicada” por vertical.
+
+**Capacidades principales:**
+- **Contexto externo por conversación:** el sistema puede recibir un “sobre” (`external_context`) y guardarlo asociado a la conversación del usuario para que el agente responda con mayor personalización.
+- **Envío saliente idempotente:** un sistema externo puede pedir a AgentHub que envíe un mensaje WhatsApp (por el canal configurado), usando una llave de idempotencia para evitar duplicados ante reintentos.
+- **WhatsApp texto o texto + imagen:** soporta mensajes con **caption** y **URL pública** de imagen (u otros tipos de media soportados).
+
+**Notas funcionales:**
+- **No reemplaza** la capacidad de un sistema externo de enviar WhatsApp directamente (si ya la tiene). Es una opción adicional para centralizar envíos en AgentHub cuando sea conveniente.
+- Para elegir el canal WhatsApp correcto cuando hay múltiples, el sistema externo puede usar el **Channel Config ID** (visible en `/channels`).
 
 ### Módulo 3: Gestión de LLMs
 
@@ -997,6 +1014,6 @@ Usuario cierra widget cuando termina
 
 ---
 
-**Última actualización:** Diciembre 2025  
-**Versión del documento:** 1.0.0
+**Última actualización:** Enero 2026  
+**Versión del documento:** 1.1.0
 

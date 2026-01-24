@@ -20,6 +20,7 @@ import {
   Unlink,
   Save,
   Link,
+  Copy,
 } from 'lucide-react';
 
 export function Agents() {
@@ -412,8 +413,24 @@ function AgentCard({
       <div className="flex-1 min-h-0">
         <h3 className="font-semibold text-sm mb-1 line-clamp-1">{agent.name}</h3>
         <p className="text-xs text-gray-600 mb-2 line-clamp-1">
-          {agent.routing_conditions?.description || 'Sin descripción'}
+          {agent.description || 'Sin descripción'}
         </p>
+        {agent.id && (
+          <div className="flex items-center text-xs text-gray-500 mb-2">
+            <span title={agent.id}>ID: {agent.id.substring(0, 8)}...</span>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                navigator.clipboard.writeText(agent.id);
+                alert('Flow ID copiado al portapapeles!');
+              }}
+              className="ml-1 p-1 hover:bg-gray-100 rounded transition-colors"
+              title="Copiar Flow ID"
+            >
+              <Copy size={12} />
+            </button>
+          </div>
+        )}
         <div className="space-y-0.5 text-xs">
           <div className="flex justify-between">
             <span className="text-gray-500">Canales:</span>
@@ -517,6 +534,7 @@ function AgentModal({
   const queryClient = useQueryClient();
   const [formData, setFormData] = useState({
     name: agent?.name || '',
+    description: agent?.description || '',
     channel_ids: agent?.channels?.map(c => c.id) || [],
     llm_id: agent?.llm_provider ? 
       llms.find(l => l.provider === agent.llm_provider && l.model === agent.llm_model)?.id || '' 
@@ -549,6 +567,7 @@ function AgentModal({
   useEffect(() => {
     setFormData({
       name: agent?.name || '',
+      description: agent?.description || '',
       channel_ids: agent?.channels?.map(c => c.id) || [],
       llm_id: agent?.llm_provider ? 
         llms.find(l => l.provider === agent.llm_provider && l.model === agent.llm_model)?.id || '' 
@@ -605,6 +624,7 @@ function AgentModal({
 
     const payload = {
       name: formData.name,
+      description: formData.description || null,
       channel_ids: formData.channel_ids, // Array de UUIDs de canales
       llm_id: formData.llm_id,
       enabled_tools: formData.enabled_tools,
@@ -770,6 +790,22 @@ function AgentModal({
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     placeholder="Ej: Agente de Retail - Pedidos"
                   />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Descripción
+                  </label>
+                  <textarea
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                    rows={2}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Descripción breve del agente"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Descripción opcional que se mostrará en el card del agente.
+                  </p>
                 </div>
 
                 {/* Canales Selector - Permite seleccionar MÚLTIPLES canales */}

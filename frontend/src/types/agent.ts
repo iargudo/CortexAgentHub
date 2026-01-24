@@ -1,6 +1,7 @@
 export interface Agent {
   id: string;
   name: string;
+  description?: string;
   channels: Array<{
     id: string;
     channel_name: string;

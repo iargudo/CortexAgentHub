@@ -32,14 +32,16 @@ export class ContextManager {
   }
 
   /**
-   * Get or create context for a conversation
+   * Get or create context for a conversation.
+   * When conversationId is a valid UUID, sessionId includes it so each conversation
+   * has its own context (avoids mixing history between different flows for the same user).
    */
   async getOrCreateContext(
     conversationId: string,
     channelType: ChannelType,
     userId: string
   ): Promise<MCPContext> {
-    const sessionId = generateSessionId(channelType, userId);
+    const sessionId = generateSessionId(channelType, userId, conversationId);
 
     // Try to get existing context
     let context = await this.mcpServer.getContext(sessionId);

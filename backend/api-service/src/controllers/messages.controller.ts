@@ -470,6 +470,102 @@ export class MessagesController {
         }
       }
       
+      // Load conversation history from database before processing
+      // This ensures the AI has access to previous conversation context
+      const conversationId = message.metadata?.conversationId || message.channelUserId;
+      const conversationId_db = await this.loadHistoryFromDatabase(conversationId, channelType, userId);
+      
+      // Option A: Prioritize flow_id from conversation (ensures we use the flow from the last campaign)
+      // This guarantees that when a client responds, we use the correct flow/agent
+      // Priority order: 1) Explicit flowId from metadata, 2) flow_id from conversation, 3) Router
+      if (!routingResult && this.db && conversationId_db) {
+        try {
+          // Get conversation with its flow_id
+          const convFlowResult = await this.db.query(
+            `SELECT flow_id FROM conversations WHERE id = $1`,
+            [conversationId_db]
+          );
+          
+          if (convFlowResult.rows.length > 0 && convFlowResult.rows[0].flow_id) {
+            const conversationFlowId = convFlowResult.rows[0].flow_id as string;
+            const requestedChannelId = message.metadata?.channel_config_id as string | undefined;
+            
+            logger.info('Found flow_id in conversation, using it as first option (sendMessage)', {
+              conversationId: conversationId_db,
+              flowId: conversationFlowId,
+              channelType,
+              userId,
+            });
+            
+            // Try to load the flow directly
+            const flowResult = await this.db.query(
+              `
+              SELECT DISTINCT
+                f.*,
+                l.provider as llm_provider,
+                l.model as llm_model,
+                l.config as llm_config,
+                c.channel_type,
+                c.config as channel_config,
+                c.id as channel_config_id
+              FROM orchestration_flows f
+              JOIN llm_configs l ON f.llm_id = l.id
+              JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
+              JOIN channel_configs c ON fc.channel_id = c.id
+              WHERE f.id = $1 
+                AND f.active = true
+                AND c.channel_type = $2
+                AND c.is_active = true
+                ${requestedChannelId ? 'AND c.id = $3' : ''}
+              ORDER BY ${requestedChannelId ? 'CASE WHEN c.id = $3 THEN 1 ELSE 2 END ASC,' : ''} fc.priority ASC
+              LIMIT 1
+              `,
+              requestedChannelId 
+                ? [conversationFlowId, channelType, requestedChannelId]
+                : [conversationFlowId, channelType]
+            );
+            
+            if (flowResult.rows.length > 0) {
+              const flow = flowResult.rows[0];
+              let flowConfig: any = flow.flow_config;
+              if (typeof flowConfig === 'string') {
+                try {
+                  flowConfig = JSON.parse(flowConfig);
+                } catch {
+                  flowConfig = {};
+                }
+              }
+              
+              routingResult = {
+                flow: {
+                  ...flow,
+                  flow_config: flowConfig,
+                },
+                llmProvider: flow.llm_provider,
+                llmModel: flow.llm_model,
+                llmConfig: flow.llm_config || {},
+                enabledTools: flow.enabled_tools || [],
+                channelConfig: flow.channel_config,
+                channelConfigId: flow.channel_config_id,
+              };
+              
+              logger.info('Using flow_id from conversation (Option A - sendMessage)', {
+                flowId: routingResult.flow.id,
+                flowName: routingResult.flow.name,
+                channelType,
+                userId,
+              });
+              
+            }
+          }
+        } catch (e: any) {
+          logger.debug('Failed to load flow from conversation (non-fatal - sendMessage)', { 
+            error: e.message, 
+            conversationId: conversationId_db 
+          });
+        }
+      }
+
       // If no explicit flow or failed to load, use FlowBasedMessageRouter
       if (!routingResult && this.flowRouter) {
         logger.debug('Attempting to route message using FlowBasedMessageRouter', {
@@ -497,11 +593,6 @@ export class MessagesController {
           message.content
         );
       }
-
-      // Load conversation history from database before processing
-      // This ensures the AI has access to previous conversation context
-      const conversationId = message.metadata?.conversationId || message.channelUserId;
-      const conversationId_db = await this.loadHistoryFromDatabase(conversationId, channelType, userId);
 
       // Process message through orchestrator (with or without routing)
       const result = await this.orchestrator.processMessage(message, routingResult);

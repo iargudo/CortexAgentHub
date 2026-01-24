@@ -131,7 +131,11 @@ export class AIOrchestrator {
       let availableTools = [...allToolsForChannel];
 
       // Filter tools based on flow configuration if available
-      if (flowRoutingResult && flowRoutingResult.enabledTools && flowRoutingResult.enabledTools.length > 0) {
+      // IMPORTANT:
+      // - If enabledTools is present (even as an empty array), treat it as an explicit allow-list.
+      //   Empty array => NO tools allowed for this flow.
+      // - If enabledTools is missing/undefined, keep legacy behavior: tools are not restricted by flow.
+      if (flowRoutingResult && Array.isArray(flowRoutingResult.enabledTools)) {
         const enabledToolNames = flowRoutingResult.enabledTools;
         availableTools = availableTools.filter((tool: any) =>
           enabledToolNames.includes(tool.name)

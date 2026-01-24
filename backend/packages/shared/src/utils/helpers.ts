@@ -12,11 +12,25 @@ export function generateUUID(): string {
   return uuidv4();
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Check if a string is a valid UUID
+ */
+export function isValidUUID(s: unknown): boolean {
+  return typeof s === 'string' && UUID_REGEX.test(s);
+}
+
 /**
  * Generate a session ID
- * Session ID must be stable across messages for the same user to maintain context
+ * Session ID must be stable across messages for the same user to maintain context.
+ * When conversationId is a valid UUID, use it so each conversation has its own context
+ * (avoids mixing history between different flows for the same user).
  */
-export function generateSessionId(channelType: string, userId: string): string {
+export function generateSessionId(channelType: string, userId: string, conversationId?: string | null): string {
+  if (conversationId && isValidUUID(conversationId)) {
+    return `${channelType}:${userId}:${conversationId}`;
+  }
   return `${channelType}:${userId}`;
 }
 

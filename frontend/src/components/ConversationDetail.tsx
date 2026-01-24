@@ -1,7 +1,21 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api } from '@/services/api';
-import { MessageSquare, User, Bot, DollarSign, Wrench, CheckCircle, XCircle, Clock, Send, X, Info } from 'lucide-react';
+import {
+  MessageSquare,
+  User,
+  Bot,
+  DollarSign,
+  Wrench,
+  CheckCircle,
+  XCircle,
+  Clock,
+  Send,
+  X,
+  Info,
+  Copy,
+  Database,
+} from 'lucide-react';
 
 interface ConversationDetailProps {
   conversationId: string;
@@ -70,6 +84,18 @@ export function ConversationDetail({ conversationId }: ConversationDetailProps) 
   }
 
   const { conversation, messages, toolExecutions, statistics } = data;
+  const externalContext = conversation?.metadata?.external_context;
+  const hasExternalContext =
+    externalContext && typeof externalContext === 'object' && Object.keys(externalContext).length > 0;
+
+  const handleCopyExternalContext = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(externalContext || {}, null, 2));
+      alert('External Context copiado al portapapeles');
+    } catch (e) {
+      alert('No se pudo copiar el External Context');
+    }
+  };
 
   const formatDate = (dateString: string) => {
     if (!dateString) return 'N/A';
@@ -269,6 +295,34 @@ export function ConversationDetail({ conversationId }: ConversationDetailProps) 
                 </div>
               </div>
             )}
+
+            {/* External Context */}
+            <div className="bg-gray-50 rounded-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <Database className="h-5 w-5" />
+                  External Context
+                </h3>
+                <button
+                  onClick={handleCopyExternalContext}
+                  className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                  title="Copiar External Context"
+                >
+                  <Copy className="h-4 w-4" />
+                  Copiar
+                </button>
+              </div>
+
+              {hasExternalContext ? (
+                <pre className="text-xs bg-white p-3 rounded border border-gray-200 overflow-x-auto max-h-80 overflow-y-auto">
+                  {JSON.stringify(externalContext, null, 2)}
+                </pre>
+              ) : (
+                <p className="text-sm text-gray-500">
+                  No hay <span className="font-mono">metadata.external_context</span> asociado a esta conversación.
+                </p>
+              )}
+            </div>
           </div>
         )}
 

@@ -27,6 +27,7 @@ import {
   ServicesController,
   KnowledgeBasesController,
 } from './controllers';
+import { IntegrationsController } from './controllers/integrations.controller';
 import { WorkerManager, DocumentProcessingWorker, getQueueManager } from '@cortex/queue-service';
 
 /**
@@ -741,17 +742,117 @@ export class APIServer {
             }
           }
 
-          // Route message to determine flow and LLM
-          // Log message metadata for debugging
-          logger.debug('Routing WebChat message', {
-            channelType: message.channelType,
-            channelUserId: message.channelUserId,
-            instanceId: message.metadata?.instanceId,
-            websiteId: message.metadata?.websiteId,
-            allMetadata: message.metadata,
-          });
+          // Option A: Prioritize flow_id from conversation (ensures we use the flow from the last campaign)
+          // This guarantees that when a client responds, we use the correct flow/agent
+          let routingResult = null;
           
-          let routingResult = await this.flowRouter.route(message);
+          if (this.db && conversationId_db) {
+            try {
+              // Get conversation with its flow_id
+              const convFlowResult = await this.db.query(
+                `SELECT flow_id FROM conversations WHERE id = $1`,
+                [conversationId_db]
+              );
+              
+              if (convFlowResult.rows.length > 0 && convFlowResult.rows[0].flow_id) {
+                const conversationFlowId = convFlowResult.rows[0].flow_id as string;
+                const requestedChannelId = message.metadata?.channel_config_id as string | undefined;
+                
+                logger.info('Found flow_id in conversation, using it as first option (WebChat)', {
+                  conversationId: conversationId_db,
+                  flowId: conversationFlowId,
+                  channelType: message.channelType,
+                  userId: message.channelUserId,
+                });
+                
+                // Try to load the flow directly
+                const flowResult = await this.db.query(
+                  `
+                  SELECT DISTINCT
+                    f.*,
+                    l.provider as llm_provider,
+                    l.model as llm_model,
+                    l.config as llm_config,
+                    c.channel_type,
+                    c.config as channel_config,
+                    c.id as channel_config_id
+                  FROM orchestration_flows f
+                  JOIN llm_configs l ON f.llm_id = l.id
+                  JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
+                  JOIN channel_configs c ON fc.channel_id = c.id
+                  WHERE f.id = $1 
+                    AND f.active = true
+                    AND c.channel_type = $2
+                    AND c.is_active = true
+                    ${requestedChannelId ? 'AND c.id = $3' : ''}
+                  ORDER BY ${requestedChannelId ? 'CASE WHEN c.id = $3 THEN 1 ELSE 2 END ASC,' : ''} fc.priority ASC
+                  LIMIT 1
+                  `,
+                  requestedChannelId 
+                    ? [conversationFlowId, message.channelType, requestedChannelId]
+                    : [conversationFlowId, message.channelType]
+                );
+                
+                if (flowResult.rows.length > 0) {
+                  const flow = flowResult.rows[0];
+                  let flowConfig: any = flow.flow_config;
+                  if (typeof flowConfig === 'string') {
+                    try {
+                      flowConfig = JSON.parse(flowConfig);
+                    } catch {
+                      flowConfig = {};
+                    }
+                  }
+                  
+                  routingResult = {
+                    flow: {
+                      ...flow,
+                      flow_config: flowConfig,
+                    },
+                    llmProvider: flow.llm_provider,
+                    llmModel: flow.llm_model,
+                    llmConfig: flow.llm_config || {},
+                    enabledTools: flow.enabled_tools || [],
+                    channelConfig: flow.channel_config,
+                    channelConfigId: flow.channel_config_id,
+                  };
+                  
+                  logger.info('Using flow_id from conversation (Option A - WebChat)', {
+                    flowId: routingResult.flow.id,
+                    flowName: routingResult.flow.name,
+                    channelType: message.channelType,
+                    userId: message.channelUserId,
+                  });
+                }
+              }
+            } catch (e: any) {
+              logger.debug('Failed to load flow from conversation (non-fatal - WebChat)', { 
+                error: e.message, 
+                conversationId: conversationId_db 
+              });
+            }
+          }
+          
+          // If conversation doesn't have flow_id or flow is not active, fall back to router
+          if (!routingResult) {
+            logger.debug('No flow_id in conversation or flow not active, using router (WebChat)', {
+              channelType: message.channelType,
+              userId: message.channelUserId,
+              conversationId: conversationId_db,
+            });
+            
+            // Route message to determine flow and LLM
+            // Log message metadata for debugging
+            logger.debug('Routing WebChat message', {
+              channelType: message.channelType,
+              channelUserId: message.channelUserId,
+              instanceId: message.metadata?.instanceId,
+              websiteId: message.metadata?.websiteId,
+              allMetadata: message.metadata,
+            });
+            
+            routingResult = await this.flowRouter.route(message);
+          }
           
           if (routingResult) {
             logger.info('WebChat message routed to flow', {
@@ -824,14 +925,32 @@ export class APIServer {
               // Update last activity and flow_id (if available from routing)
               const flowId = routingResult?.flow?.id || null;
               if (flowId) {
-                await this.db.query(
-                  `UPDATE conversations SET last_activity = NOW(), flow_id = $2 WHERE id = $1`,
-                  [dbConversationId, flowId]
+                // Get current flow_id to compare
+                const currentFlowResult = await this.db.query(
+                  `SELECT flow_id FROM conversations WHERE id = $1`,
+                  [dbConversationId]
                 );
-                logger.debug('Updated conversation flow_id', {
-                  conversationId: dbConversationId,
-                  flowId: flowId,
-                });
+                const currentFlowId = currentFlowResult.rows[0]?.flow_id;
+                
+                // Update flow_id if it's different or null
+                if (currentFlowId !== flowId) {
+                  await this.db.query(
+                    `UPDATE conversations SET last_activity = NOW(), flow_id = $2 WHERE id = $1`,
+                    [dbConversationId, flowId]
+                  );
+                  logger.info('Updated conversation flow_id', {
+                    conversationId: dbConversationId,
+                    oldFlowId: currentFlowId,
+                    newFlowId: flowId,
+                    reason: 'Different flow_id from new routing',
+                  });
+                } else {
+                  // Only update last_activity if flow_id is the same
+                  await this.db.query(
+                    `UPDATE conversations SET last_activity = NOW() WHERE id = $1`,
+                    [dbConversationId]
+                  );
+                }
               } else {
                 await this.db.query(
                   `UPDATE conversations SET last_activity = NOW() WHERE id = $1`,
@@ -1114,6 +1233,7 @@ export class APIServer {
     const adminController = new AdminController(this.db, this.mcpServer);
     const servicesController = new ServicesController();
     const knowledgeBasesController = new KnowledgeBasesController(this.db, enableDocumentQueue);
+    const integrationsController = new IntegrationsController(this.db, this.mcpServer);
 
     // Register routes
     logger.info('Starting route registration...');
@@ -1123,6 +1243,7 @@ export class APIServer {
       admin: adminController,
       services: servicesController,
       knowledgeBases: knowledgeBasesController,
+      integrations: integrationsController,
     }, this.webchatAdapter, this.db);
 
     // Log all registered routes for debugging (in development)

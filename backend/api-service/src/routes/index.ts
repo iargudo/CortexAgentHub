@@ -7,11 +7,13 @@ import {
   ServicesController,
   KnowledgeBasesController,
 } from '../controllers';
+import { IntegrationsController } from '../controllers/integrations.controller';
 import { messagesRoutes } from './messages.routes';
 import { conversationsRoutes } from './conversations.routes';
 import { webhooksRoutes } from './webhooks.routes';
 import { adminRoutes } from './admin.routes';
 import { servicesRoutes } from './services.routes';
+import { integrationsRoutes } from './integrations.routes';
 import {
   knowledgeBasesRoutes,
   flowKnowledgeBasesRoutes,
@@ -32,6 +34,7 @@ export async function registerRoutes(
     admin: AdminController;
     services: ServicesController;
     knowledgeBases: KnowledgeBasesController;
+    integrations: IntegrationsController;
   },
   webchatAdapter?: any,
   db?: Pool
@@ -442,6 +445,12 @@ export async function registerRoutes(
       instance.register(
         async (convs) => conversationsRoutes(convs, controllers.messages),
         { prefix: '/conversations' }
+      );
+
+      // Integrations routes (generic, API-key auth)
+      instance.register(
+        async (ints) => integrationsRoutes(ints, controllers.integrations),
+        { prefix: '/integrations' }
       );
       
       // WebChat WebSocket route (integrated with Fastify for Azure App Service)

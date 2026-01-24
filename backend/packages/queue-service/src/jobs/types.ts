@@ -88,7 +88,9 @@ export interface WhatsAppSendingJob {
   userId: string;
   message: {
     channelUserId: string;
-    content: string;
+    content: string; // Text body (or caption if media is present)
+    mediaUrl?: string; // Publicly accessible URL for media
+    mediaType?: 'image' | 'video' | 'document';
     metadata?: any;
   };
   channelConfig: {

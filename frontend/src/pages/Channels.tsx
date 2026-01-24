@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/services/api';
-import { MessageSquare, Check, X, Plus, Edit2, Trash2, Send, Phone, CheckCircle, AlertCircle } from 'lucide-react';
+import { MessageSquare, Check, X, Plus, Edit2, Trash2, Send, Phone, Copy, CheckCircle, AlertCircle } from 'lucide-react';
 import { Modal } from '@/components/Modal';
 
 interface ChannelConfig {
@@ -238,6 +238,26 @@ export function Channels() {
     }
   };
 
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      // Fallback (older browsers / non-secure contexts)
+      const el = document.createElement('textarea');
+      el.value = text;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
+  };
+
+  const formatId = (id?: string) => {
+    if (!id) return '';
+    if (id.length <= 14) return id;
+    return `${id.slice(0, 8)}…${id.slice(-4)}`;
+  };
+
   if (isLoading) {
     return <div className="flex justify-center p-8">Loading...</div>;
   }
@@ -273,6 +293,21 @@ export function Channels() {
               <p className="text-xs text-gray-600 uppercase tracking-wide">
                 {channel.channel_type || channel.type}
               </p>
+              {channel.id && (
+                <div className="mt-2 flex items-center justify-center gap-2 text-xs text-gray-500">
+                  <span className="font-mono" title={channel.id}>
+                    ID: {formatId(channel.id)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(channel.id)}
+                    className="p-1 hover:bg-gray-100 rounded transition-colors"
+                    title="Copiar ID"
+                  >
+                    <Copy size={12} className="text-gray-500" />
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="flex gap-2 pt-2 border-t mt-2">

@@ -7,7 +7,7 @@ import {
   TelegramAdapter,
   EmailAdapter,
 } from '@cortex/channel-adapters';
-import { IncomingMessage, ChannelType, AppError, createLogger } from '@cortex/shared';
+import { IncomingMessage, ChannelType, AppError, createLogger, generateSessionId } from '@cortex/shared';
 import { EmbeddingService, RAGService } from '../services';
 import { getQueueManager, QueueName } from '@cortex/queue-service';
 
@@ -152,6 +152,362 @@ export class WebhooksController {
     }
 
     return routingResult;
+  }
+
+  /**
+   * Attach conversation metadata (from DB) to MCP context + optionally enrich system prompt
+   * - No-op if DB not available or conversation doesn't exist yet
+   * - Only affects conversations that already have `metadata.external_context`
+   * This is intentionally additive to avoid impacting existing production flows.
+   */
+  private async attachExternalContextToProcessing(
+    normalizedMessage: IncomingMessage,
+    routingResult: any | null,
+    preferredConversationId?: string | null
+  ): Promise<{ routingResult: any | null; conversationId?: string; conversationMetadata?: any }> {
+    if (!this.db) return { routingResult };
+
+    const channelType = normalizedMessage.channelType;
+    const userId = normalizedMessage.channelUserId;
+
+    try {
+      let conv: { rows: Array<{ id: string; metadata: any }> };
+      if (preferredConversationId && this.isUuid(preferredConversationId)) {
+        conv = await this.db.query(
+          `SELECT id, metadata FROM conversations WHERE id = $1 LIMIT 1`,
+          [preferredConversationId]
+        );
+      } else {
+        conv = await this.db.query(
+          `SELECT id, metadata FROM conversations WHERE channel = $1 AND channel_user_id = $2 ORDER BY last_activity DESC LIMIT 1`,
+          [channelType, userId]
+        );
+      }
+
+      if (conv.rows.length === 0) {
+        return { routingResult };
+      }
+
+      const conversationId = conv.rows[0].id as string;
+      const conversationMetadata = conv.rows[0].metadata || {};
+
+      if (!normalizedMessage.metadata) normalizedMessage.metadata = {};
+      if (!normalizedMessage.metadata.conversationId) {
+        normalizedMessage.metadata.conversationId = conversationId;
+      }
+
+      const externalContext = conversationMetadata?.external_context;
+      if (!externalContext || typeof externalContext !== 'object') {
+        return { routingResult, conversationId, conversationMetadata };
+      }
+
+      // Safe log (do not print seed values)
+      try {
+        const namespaces = Object.keys(externalContext || {});
+        const sample = namespaces.slice(0, 5).reduce((acc: any, ns: string) => {
+          const entry = externalContext?.[ns] || {};
+          acc[ns] = {
+            case_id: entry.case_id || null,
+            refsKeys: entry.refs ? Object.keys(entry.refs) : [],
+            seedKeys: entry.seed ? Object.keys(entry.seed) : [],
+          };
+          return acc;
+        }, {});
+        logger.info('External context detected for conversation (will attach to prompt)', {
+          conversationId,
+          channelType,
+          userId,
+          namespaces,
+          sample,
+        });
+      } catch {
+        // ignore
+      }
+
+      // Verbose log (PII risk): show the exact external_context JSON (truncated)
+      if (this.envFlag('LOG_EXTERNAL_CONTEXT_JSON')) {
+        logger.warn('External context JSON (VERBOSE)', {
+          conversationId,
+          channelType,
+          userId,
+          external_context: this.truncateText(externalContext, 4000),
+        });
+      }
+
+      // Ensure MCP context exists and update its metadata before processing
+      try {
+        const mcpServer = (this.orchestrator as any).mcpServer;
+        const contextManager = (this.orchestrator as any).contextManager;
+        if (mcpServer && contextManager) {
+          const mcpContext = await contextManager.getOrCreateContext(
+            conversationId,
+            channelType,
+            userId
+          );
+          const sessionId = mcpContext.sessionId || generateSessionId(channelType, userId, conversationId);
+          const existing = await mcpServer.getContext(sessionId);
+          if (existing) {
+            const merged = {
+              ...(existing.metadata || {}),
+              ...(conversationMetadata || {}),
+              external_context: {
+                ...(existing.metadata?.external_context || {}),
+                ...(conversationMetadata?.external_context || {}),
+              },
+            };
+            await mcpServer.updateContext(sessionId, {
+              conversationId,
+              metadata: merged,
+              updatedAt: new Date().toISOString(),
+            });
+          }
+        }
+      } catch (e: any) {
+        logger.debug('Failed to sync external context into MCP context (non-fatal)', {
+          error: e.message,
+          userId,
+        });
+      }
+
+      // Enrich system prompt only if flow routing exists
+      if (routingResult?.flow?.flow_config) {
+        const currentSystemPrompt = routingResult.flow.flow_config?.systemPrompt || '';
+        const externalContextText = this.formatExternalContextForPrompt(externalContext);
+        if (externalContextText) {
+          const enhancedSystemPrompt =
+            currentSystemPrompt +
+            `\n\n` +
+            externalContextText +
+            `\n\n` +
+            `You may use the external_context data above to personalize and handle this conversation. ` +
+            `If you have tools available to fetch/update external case details using the provided identifiers, use them when needed.`;
+
+          if (this.envFlag('LOG_ENHANCED_SYSTEM_PROMPT')) {
+            logger.warn('Enhanced system prompt (VERBOSE)', {
+              conversationId,
+              channelType,
+              userId,
+              systemPrompt: this.truncateText(enhancedSystemPrompt, 4000),
+            });
+          }
+
+          routingResult = {
+            ...routingResult,
+            flow: {
+              ...routingResult.flow,
+              flow_config: {
+                ...routingResult.flow.flow_config,
+                systemPrompt: enhancedSystemPrompt,
+              },
+            },
+          };
+        }
+      }
+
+      return { routingResult, conversationId, conversationMetadata };
+    } catch (e: any) {
+      logger.debug('Failed to attach external context (non-fatal)', { error: e.message });
+      return { routingResult };
+    }
+  }
+
+  private formatExternalContextForPrompt(externalContext: any): string | null {
+    try {
+      const json = JSON.stringify(externalContext, null, 2);
+      if (!json || json === 'null' || json === '{}') return null;
+      // Hard cap to avoid giant prompts
+      const capped = json.length > 4000 ? json.substring(0, 4000) + '\n...truncated...' : json;
+      return `EXTERNAL_CONTEXT_JSON:\n${capped}`;
+    } catch {
+      return null;
+    }
+  }
+
+  private envFlag(name: string): boolean {
+    const v = String(process.env[name] || '').toLowerCase().trim();
+    return v === 'true' || v === '1' || v === 'yes';
+  }
+
+  /**
+   * Load conversation history from DB and restore to MCP context for the given conversation.
+   * Ensures the orchestrator uses only this conversation's history (avoids mixing between flows).
+   */
+  private async loadAndRestoreHistoryForConversation(
+    conversationId: string,
+    channelType: ChannelType,
+    userId: string
+  ): Promise<void> {
+    if (!this.db || !this.isUuid(conversationId)) return;
+    const contextManager = (this.orchestrator as any)?.contextManager;
+    if (!contextManager) return;
+    try {
+      const messagesResult = await this.db.query(
+        `SELECT role, content FROM messages WHERE conversation_id = $1 ORDER BY timestamp ASC LIMIT 100`,
+        [conversationId]
+      );
+      if (messagesResult.rows.length === 0) return;
+
+      const mcpContext = await contextManager.getOrCreateContext(conversationId, channelType, userId);
+      await contextManager.clearHistory(mcpContext.sessionId);
+      for (const msg of messagesResult.rows) {
+        await contextManager.addMessage(
+          mcpContext.sessionId,
+          msg.role as 'user' | 'assistant' | 'system',
+          msg.content
+        );
+      }
+      logger.info('Restored conversation history from database for WhatsApp', {
+        conversationId,
+        messageCount: messagesResult.rows.length,
+        channelType,
+        userId,
+      });
+    } catch (e: any) {
+      logger.debug('Failed to load/restore history for conversation (non-fatal)', {
+        conversationId,
+        error: e.message,
+      });
+    }
+  }
+
+  private truncateText(text: any, max = 2000): string {
+    const s = typeof text === 'string' ? text : JSON.stringify(text);
+    if (s.length <= max) return s;
+    return s.slice(0, max) + '…[truncated]';
+  }
+
+  private isUuid(value: any): boolean {
+    if (!value || typeof value !== 'string') return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  }
+
+  private extractExplicitFlowIdFromConversationMetadata(conversationMetadata: any): string | undefined {
+    if (!conversationMetadata || typeof conversationMetadata !== 'object') return undefined;
+    if (typeof conversationMetadata.flowId === 'string' && this.isUuid(conversationMetadata.flowId)) {
+      return conversationMetadata.flowId;
+    }
+
+    const external = conversationMetadata.external_context;
+    if (!external || typeof external !== 'object') return undefined;
+    for (const ns of Object.keys(external)) {
+      const flowId = external?.[ns]?.routing?.flowId;
+      if (typeof flowId === 'string' && this.isUuid(flowId)) return flowId;
+    }
+    return undefined;
+  }
+
+  /**
+   * Try to load flow routing from conversation's flow_id (Option A: prioritize conversation flow_id)
+   * This ensures that when a client responds, we use the flow from the last campaign sent
+   * Now supports multiple conversations per number (one per flow_id)
+   * Returns both routing result and conversationId so we use the same conversation for context/history.
+   */
+  private async tryLoadFlowFromConversation(
+    channelType: ChannelType,
+    userId: string,
+    requestedChannelId?: string
+  ): Promise<{ routingResult: any; conversationId: string } | null> {
+    if (!this.db) return null;
+    try {
+      const convResult = await this.db.query(
+        `SELECT id, flow_id FROM conversations 
+         WHERE channel = $1 AND channel_user_id = $2 AND flow_id IS NOT NULL
+         ORDER BY last_activity DESC
+         LIMIT 1`,
+        [channelType, userId]
+      );
+
+      if (convResult.rows.length === 0 || !convResult.rows[0].flow_id) {
+        return null;
+      }
+
+      const conversationId = convResult.rows[0].id as string;
+      const conversationFlowId = convResult.rows[0].flow_id as string;
+
+      logger.info('Found flow_id in conversation, using it as first option', {
+        conversationId,
+        flowId: conversationFlowId,
+        channelType,
+        userId,
+      });
+
+      const routingResult = await this.tryLoadExplicitFlowRouting(conversationFlowId, channelType, requestedChannelId);
+      if (!routingResult) return null;
+      return { routingResult, conversationId };
+    } catch (e: any) {
+      logger.debug('Failed to load flow from conversation (non-fatal)', {
+        error: e.message,
+        channelType,
+        userId,
+      });
+      return null;
+    }
+  }
+
+  private async tryLoadExplicitFlowRouting(
+    flowId: string,
+    channelType: ChannelType,
+    requestedChannelId?: string
+  ): Promise<any | null> {
+    if (!this.db) return null;
+    try {
+      const flowResult = await this.db.query(
+        `
+        SELECT DISTINCT
+          f.*,
+          l.provider as llm_provider,
+          l.model as llm_model,
+          l.config as llm_config,
+          c.channel_type,
+          c.config as channel_config,
+          c.id as channel_config_id,
+          fc.priority as channel_priority,
+          CASE 
+            WHEN c.id = $3 THEN 1
+            ELSE 2
+          END as channel_match_priority
+        FROM orchestration_flows f
+        JOIN llm_configs l ON f.llm_id = l.id
+        JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
+        JOIN channel_configs c ON fc.channel_id = c.id
+        WHERE f.id = $1 
+          AND f.active = true
+          AND c.channel_type = $2
+          AND c.is_active = true
+        ORDER BY channel_match_priority ASC, fc.priority ASC
+        LIMIT 1
+        `,
+        [flowId, channelType, requestedChannelId || '']
+      );
+
+      if (flowResult.rows.length === 0) return null;
+
+      const flow = flowResult.rows[0];
+      let flowConfig: any = flow.flow_config;
+      if (typeof flowConfig === 'string') {
+        try {
+          flowConfig = JSON.parse(flowConfig);
+        } catch {
+          flowConfig = {};
+        }
+      }
+
+      return {
+        flow: {
+          ...flow,
+          flow_config: flowConfig,
+        },
+        llmProvider: flow.llm_provider,
+        llmModel: flow.llm_model,
+        llmConfig: flow.llm_config || {},
+        enabledTools: flow.enabled_tools || [],
+        channelConfig: flow.channel_config,
+        channelConfigId: flow.channel_config_id,
+      };
+    } catch (e: any) {
+      logger.debug('Failed to load explicit flow routing (non-fatal)', { error: e.message, flowId });
+      return null;
+    }
   }
 
   /**
@@ -689,31 +1045,97 @@ export class WebhooksController {
       const isValidUUID = conversationId && typeof conversationId === 'string' && uuidRegex.test(conversationId);
 
       // Find or create conversation
-      // Only search by conversationId if it's a valid UUID
-      let convResult;
+      // Now supports multiple conversations per number (one per flow_id)
+      const flowId = routingResult?.flow?.id || null;
+      let convResult: any = { rows: [] };
+      
       if (isValidUUID) {
+        // First try to find by conversationId
         convResult = await this.db.query(
-          `SELECT id FROM conversations 
-           WHERE id = $1 OR (channel = $2 AND channel_user_id = $3)
-           LIMIT 1`,
-          [conversationId, channelType, userId]
+          `SELECT id, flow_id FROM conversations WHERE id = $1`,
+          [conversationId]
         );
+        
+        // If not found by ID, search by channel, userId, and flow_id
+        if (convResult.rows.length === 0 && flowId) {
+          convResult = await this.db.query(
+            `SELECT id, flow_id FROM conversations 
+             WHERE channel = $1 AND channel_user_id = $2 AND flow_id = $3
+             LIMIT 1`,
+            [channelType, userId, flowId]
+          );
+        }
+        
+        // If still not found, search by channel and userId (most recent)
+        if (convResult.rows.length === 0) {
+          convResult = await this.db.query(
+            `SELECT id, flow_id FROM conversations 
+             WHERE channel = $1 AND channel_user_id = $2
+             ORDER BY last_activity DESC
+             LIMIT 1`,
+            [channelType, userId]
+          );
+        }
       } else {
-        // If conversationId is not a valid UUID, search only by channel and userId
-        convResult = await this.db.query(
-          `SELECT id FROM conversations 
-           WHERE channel = $1 AND channel_user_id = $2
-           LIMIT 1`,
-          [channelType, userId]
-        );
+        // If conversationId is not a valid UUID, search by channel, userId, and flow_id
+        if (flowId) {
+          convResult = await this.db.query(
+            `SELECT id, flow_id FROM conversations 
+             WHERE channel = $1 AND channel_user_id = $2 AND flow_id = $3
+             LIMIT 1`,
+            [channelType, userId, flowId]
+          );
+        }
+        
+        // If not found with flow_id, get most recent conversation
+        if (convResult.rows.length === 0) {
+          convResult = await this.db.query(
+            `SELECT id, flow_id FROM conversations 
+             WHERE channel = $1 AND channel_user_id = $2
+             ORDER BY last_activity DESC
+             LIMIT 1`,
+            [channelType, userId]
+          );
+        }
       }
 
       let conversationId_db: string;
-      const flowId = routingResult?.flow?.id || null;
+      
+      // Get channel_config_id from normalizedMessage metadata if available
+      let channelConfigId: string | undefined = normalizedMessage.metadata?.channelId || 
+                              normalizedMessage.metadata?.channel_config_id ||
+                              routingResult?.channelConfigId;
+      
+      // Ensure channelConfigId is a string (UUID) if it exists
+      if (channelConfigId) {
+        if (typeof channelConfigId !== 'string') {
+          channelConfigId = String(channelConfigId);
+        }
+        // Basic UUID validation - if invalid, set to undefined
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(channelConfigId)) {
+          logger.warn('Invalid UUID format for channel_config_id, ignoring', {
+            channelConfigId,
+            channelType,
+            userId,
+          });
+          channelConfigId = undefined;
+        }
+      }
       
       if (convResult.rows.length === 0) {
-        // Create new conversation with flow_id
-        // Only use conversationId if it's a valid UUID
+        // Create new conversation with flow_id and channel_config_id
+        // Now supports multiple conversations per number (one per flow_id)
+        const conversationMetadata: any = {
+          flowId: routingResult?.flow?.id,
+          flowName: routingResult?.flow?.name,
+        };
+        
+        // Add channel_config_id to metadata if available and valid
+        if (channelConfigId) {
+          conversationMetadata.channel_config_id = channelConfigId;
+        }
+        
         const insertQuery = isValidUUID
           ? `INSERT INTO conversations (id, channel, channel_user_id, started_at, last_activity, status, metadata, flow_id)
              VALUES ($1, $2, $3, NOW(), NOW(), 'active', $4, $5)
@@ -727,38 +1149,152 @@ export class WebhooksController {
               conversationId,
               channelType,
               userId,
-              JSON.stringify({
-                flowId: routingResult?.flow?.id,
-                flowName: routingResult?.flow?.name,
-              }),
+              JSON.stringify(conversationMetadata),
               flowId,
             ]
           : [
               channelType,
               userId,
-              JSON.stringify({
-                flowId: routingResult?.flow?.id,
-                flowName: routingResult?.flow?.name,
-              }),
+              JSON.stringify(conversationMetadata),
               flowId,
             ];
         
-        const insertResult = await this.db.query(insertQuery, insertParams);
-        conversationId_db = insertResult.rows[0].id;
-        logger.debug('Created new conversation in database', {
-          conversationId: conversationId_db,
-          channelType,
-          userId,
-          flowId,
-        });
+        try {
+          const insertResult = await this.db.query(insertQuery, insertParams);
+          conversationId_db = insertResult.rows[0].id;
+          logger.info('Created new conversation', {
+            conversationId: conversationId_db,
+            flowId,
+            channelType,
+            userId,
+          });
+        } catch (insertError: any) {
+          // If unique constraint violation, try to find existing conversation
+          if (insertError.code === '23505') {
+            logger.debug('Unique constraint violation, searching for existing conversation', {
+              channelType,
+              userId,
+              flowId,
+            });
+            const existingResult = await this.db.query(
+              `SELECT id FROM conversations 
+               WHERE channel = $1 AND channel_user_id = $2 AND flow_id = $3
+               LIMIT 1`,
+              [channelType, userId, flowId]
+            );
+            if (existingResult.rows.length > 0) {
+              conversationId_db = existingResult.rows[0].id;
+              logger.info('Found existing conversation after constraint violation', {
+                conversationId: conversationId_db,
+                flowId,
+              });
+            } else {
+              throw insertError;
+            }
+          } else {
+            throw insertError;
+          }
+        }
       } else {
         conversationId_db = convResult.rows[0].id;
-        // Update flow_id if conversation exists but flow_id is null
-        if (flowId) {
+        const existingFlowId = convResult.rows[0]?.flow_id;
+        
+        // If flow_id is different, create a new conversation instead of updating
+        if (flowId && existingFlowId && existingFlowId !== flowId) {
+          logger.info('Flow_id mismatch, creating new conversation', {
+            existingConversationId: conversationId_db,
+            existingFlowId,
+            newFlowId: flowId,
+            channelType,
+            userId,
+            reason: 'Different flow_id requires separate conversation',
+          });
+          
+          // Create new conversation with the new flow_id
+          const conversationMetadata: any = {
+            flowId: routingResult?.flow?.id,
+            flowName: routingResult?.flow?.name,
+          };
+          
+          if (channelConfigId) {
+            conversationMetadata.channel_config_id = channelConfigId;
+          }
+          
+          try {
+            const newConvResult = await this.db.query(
+              `INSERT INTO conversations (channel, channel_user_id, started_at, last_activity, status, metadata, flow_id)
+               VALUES ($1, $2, NOW(), NOW(), 'active', $3, $4)
+               RETURNING id`,
+              [channelType, userId, JSON.stringify(conversationMetadata), flowId]
+            );
+            conversationId_db = newConvResult.rows[0].id;
+            logger.info('Created new conversation for different flow_id', {
+              conversationId: conversationId_db,
+              flowId,
+            });
+          } catch (insertError: any) {
+            // If unique constraint violation, conversation already exists
+            if (insertError.code === '23505') {
+              const existingResult = await this.db.query(
+                `SELECT id FROM conversations 
+                 WHERE channel = $1 AND channel_user_id = $2 AND flow_id = $3
+                 LIMIT 1`,
+                [channelType, userId, flowId]
+              );
+              if (existingResult.rows.length > 0) {
+                conversationId_db = existingResult.rows[0].id;
+                logger.info('Found existing conversation with matching flow_id', {
+                  conversationId: conversationId_db,
+                  flowId,
+                });
+              } else {
+                // Fallback: use existing conversation
+                logger.warn('Could not create new conversation, using existing', {
+                  conversationId: conversationId_db,
+                  error: insertError.message,
+                });
+              }
+            } else {
+              // Fallback: use existing conversation
+              logger.warn('Error creating new conversation, using existing', {
+                conversationId: conversationId_db,
+                error: insertError.message,
+              });
+            }
+          }
+        } else if (flowId && !existingFlowId) {
+          // Set flow_id if it wasn't set
           await this.db.query(
-            `UPDATE conversations SET flow_id = COALESCE(flow_id, $1) WHERE id = $2`,
+            `UPDATE conversations SET flow_id = $1 WHERE id = $2`,
             [flowId, conversationId_db]
           );
+          logger.info('Set flow_id on existing conversation', {
+            conversationId: conversationId_db,
+            flowId,
+          });
+        }
+        
+        // Update metadata to include channel_config_id if not already present
+        if (channelConfigId) {
+          const currentMetadata = await this.db.query(
+            `SELECT metadata FROM conversations WHERE id = $1`,
+            [conversationId_db]
+          );
+          
+          if (currentMetadata.rows.length > 0) {
+            const existingMetadata = currentMetadata.rows[0].metadata || {};
+            if (!existingMetadata.channel_config_id) {
+              existingMetadata.channel_config_id = channelConfigId;
+              await this.db.query(
+                `UPDATE conversations SET metadata = $1 WHERE id = $2`,
+                [JSON.stringify(existingMetadata), conversationId_db]
+              );
+              logger.debug('Updated conversation metadata with channel_config_id', {
+                conversationId: conversationId_db,
+                channelConfigId,
+              });
+            }
+          }
         }
       }
 
@@ -1287,16 +1823,76 @@ export class WebhooksController {
       });
     }
 
-    // Route message to determine flow and LLM
-    // Now the router can use the explicit channelId for precise routing
-    let routingResult = await this.flowRouter.route(normalizedMessage);
+    const requestedChannelId =
+      (normalizedMessage.metadata?.channelId as string) ||
+      (normalizedMessage.metadata?.channel_config_id as string) ||
+      identifiedChannelId;
 
-    // Enhance with RAG context if flow is available
+    // Option A: Prioritize flow_id from conversation (same conversation used for context/history)
+    const optionA = await this.tryLoadFlowFromConversation(
+      normalizedMessage.channelType,
+      normalizedMessage.channelUserId,
+      typeof requestedChannelId === 'string' ? requestedChannelId : undefined
+    );
+
+    let routingResult: any = null;
+    let resolvedConversationId: string | undefined;
+
+    if (optionA) {
+      routingResult = optionA.routingResult;
+      resolvedConversationId = optionA.conversationId;
+      if (!normalizedMessage.metadata) normalizedMessage.metadata = {};
+      normalizedMessage.metadata.conversationId = resolvedConversationId;
+      logger.info('Using flow_id from conversation (Option A)', {
+        flowId: routingResult?.flow?.id,
+        flowName: routingResult?.flow?.name,
+        conversationId: resolvedConversationId,
+        channelType: normalizedMessage.channelType,
+        userId: normalizedMessage.channelUserId,
+      });
+    } else {
+      logger.debug('No flow_id in conversation or flow not active, using router', {
+        channelType: normalizedMessage.channelType,
+        userId: normalizedMessage.channelUserId,
+      });
+      routingResult = await this.flowRouter.route(normalizedMessage);
+    }
+
     if (routingResult) {
       routingResult = await this.enhanceWithRAGContext(
         routingResult,
         normalizedMessage.content
       );
+    }
+
+    // Attach external context using the same conversation we route to (avoids mixing contexts)
+    const attachedExternal = await this.attachExternalContextToProcessing(
+      normalizedMessage,
+      routingResult,
+      resolvedConversationId ?? undefined
+    );
+    routingResult = attachedExternal.routingResult;
+    const attachedConversationMetadata = attachedExternal.conversationMetadata;
+    const effectiveConversationId = resolvedConversationId ?? attachedExternal.conversationId;
+
+    if (!routingResult) {
+      const explicitFlowId = this.extractExplicitFlowIdFromConversationMetadata(attachedConversationMetadata);
+      if (explicitFlowId) {
+        const explicitRouting = await this.tryLoadExplicitFlowRouting(
+          explicitFlowId,
+          normalizedMessage.channelType,
+          typeof requestedChannelId === 'string' ? requestedChannelId : undefined
+        );
+        if (explicitRouting) {
+          routingResult = await this.enhanceWithRAGContext(explicitRouting, normalizedMessage.content);
+          const reattached = await this.attachExternalContextToProcessing(
+            normalizedMessage,
+            routingResult,
+            effectiveConversationId ?? undefined
+          );
+          routingResult = reattached.routingResult;
+        }
+      }
     }
 
     if (!routingResult) {
@@ -1315,6 +1911,15 @@ export class WebhooksController {
         },
         userId: normalizedMessage.channelUserId,
       });
+
+      const convIdForHistory = effectiveConversationId ?? attachedExternal?.conversationId;
+      if (convIdForHistory) {
+        await this.loadAndRestoreHistoryForConversation(
+          convIdForHistory,
+          normalizedMessage.channelType,
+          normalizedMessage.channelUserId
+        );
+      }
 
       // Use default orchestrator without routing
       const result = await this.orchestrator.processMessage(normalizedMessage);
@@ -1456,6 +2061,15 @@ export class WebhooksController {
         },
         userId: normalizedMessage.channelUserId,
       });
+
+      const convIdForHistory = effectiveConversationId ?? attachedExternal?.conversationId;
+      if (convIdForHistory) {
+        await this.loadAndRestoreHistoryForConversation(
+          convIdForHistory,
+          normalizedMessage.channelType,
+          normalizedMessage.channelUserId
+        );
+      }
 
       // Process through orchestrator with routing result
       const result = await this.orchestrator.processMessage(normalizedMessage, routingResult);

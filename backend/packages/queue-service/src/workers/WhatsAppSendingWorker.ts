@@ -54,8 +54,18 @@ export class WhatsAppSendingWorker extends BaseWorker<WhatsAppSendingJob> {
         config: adapterConfig,
       });
 
-      // Send message
+      // Send message (text or media with caption)
+      if (message.mediaUrl && message.mediaType) {
+        logger.info('Sending WhatsApp media message', {
+          jobId: job.id,
+          userId,
+          mediaType: message.mediaType,
+          hasCaption: !!message.content,
+        });
+        await whatsappAdapter.sendMedia(userId, message.mediaUrl, message.mediaType, message.content || '');
+      } else {
       await whatsappAdapter.sendMessage(userId, message, adapterConfig);
+      }
 
       logger.info('WhatsApp message sent successfully', {
         jobId: job.id,

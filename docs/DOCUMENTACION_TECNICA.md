@@ -1,7 +1,7 @@
 # 📚 Documentación Técnica - CortexAgentHub
 
-**Versión:** 1.0.0  
-**Última actualización:** Diciembre 2025  
+**Versión:** 1.1.0  
+**Última actualización:** Enero 2026  
 **Autor:** Equipo de Desarrollo CortexAgentHub
 
 ---
@@ -293,7 +293,35 @@ Repositorios y migraciones de base de datos.
 - started_at (TIMESTAMP)
 - last_activity (TIMESTAMP)
 - status (VARCHAR) - active, closed, archived
-- metadata (JSONB)
+- metadata (JSONB)  -- incluye metadata operativa y contexto externo (ver abajo)
+```
+
+### `conversations.metadata` (JSONB)
+
+Campo flexible para almacenar información adicional por conversación (sin cambios de esquema).
+
+**Claves comúnmente usadas:**
+- `channel_config_id` (UUID): identifica el `channel_configs.id` usado para esa conversación (evita enviar salientes por el canal equivocado cuando existen múltiples canales activos).
+- `external_context` (object): contexto genérico proveniente de sistemas externos (ej: CRM, ERP, Collections) para personalizar el comportamiento del agente.
+
+**Estructura recomendada de `external_context`:**
+```json
+{
+  "namespace": "cortexcollect",
+  "caseId": "case-001",
+  "refs": {
+    "credito_id": "uuid-o-identificador"
+  },
+  "seed": {
+    "nombre_cliente": "CELSO",
+    "monto": 120.5
+  },
+  "routing": {
+    "flowId": "uuid-opcional",
+    "channelConfigId": "uuid-opcional"
+  },
+  "updatedAt": "2026-01-18T00:00:00.000Z"
+}
 ```
 
 **`messages`** - Mensajes individuales
@@ -512,6 +540,59 @@ CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector para búsqueda vectori
 - `POST /webhooks/whatsapp` - Webhook de WhatsApp (mensajes entrantes)
 - `POST /webhooks/telegram` - Webhook de Telegram
 
+#### Integrations (`/api/v1/integrations`) (API Key)
+
+Endpoints genéricos para que sistemas externos:
+- Inyecten contexto (`external_context`) en una conversación.
+- Envíen mensajes salientes (idempotentes) por WhatsApp usando la misma infraestructura de colas/worker.
+
+**Autenticación:**
+- Header requerido: `x-api-key: <API_KEY>`
+- En `production`, el backend valida contra `VALID_API_KEYS` (CSV).
+
+**1) Listar canales (descubrir `channel_configs.id`)**
+- `GET /api/v1/integrations/channels?channelType=whatsapp&activeOnly=true`
+
+Devuelve identificadores **no sensibles** (no expone tokens).
+
+**2) Upsert de contexto externo**
+- `POST /api/v1/integrations/context/upsert`
+
+Body (resumen):
+```json
+{
+  "channelType": "whatsapp",
+  "userId": "593995906687",
+  "envelope": {
+    "namespace": "cortexcollect",
+    "caseId": "case-001",
+    "refs": {},
+    "seed": {},
+    "routing": { "flowId": "uuid-opcional", "channelConfigId": "uuid-opcional" }
+  },
+  "conversationMetadata": {}
+}
+```
+
+**3) Enviar mensaje saliente (idempotente)**
+- `POST /api/v1/integrations/outbound/send`
+
+Headers:
+- `x-api-key: <API_KEY>`
+- `idempotency-key: <string>` (recomendado: estable y único por “intento lógico”)
+
+Body:
+```json
+{
+  "channelType": "whatsapp",
+  "userId": "593995906687",
+  "message": "Texto (opcional como caption)",
+  "mediaType": "image",
+  "mediaUrl": "https://public.example.com/img.png",
+  "envelope": { "namespace": "cortexcollect", "caseId": "case-001" }
+}
+```
+
 ### WebSocket (`/webchat/ws`)
 
 **Autenticación:**
@@ -642,6 +723,11 @@ Servidor MCP (Model Context Protocol) para ejecución de tools dinámicas.
 - Todos los endpoints `/api/admin/*` requieren autenticación
 - WebSocket requiere token JWT en conexión inicial
 
+**API Key (Integrations):**
+- Los endpoints `/api/v1/integrations/*` requieren `x-api-key`.
+- En `NODE_ENV=development` se hace bypass y se acepta `dev-mode` (para desarrollo local).
+- En `NODE_ENV=production` se valida contra `VALID_API_KEYS` (CSV con comas).
+
 ### Autorización
 
 **Roles:**
@@ -720,6 +806,10 @@ REDIS_URL=redis://...
 
 # JWT
 JWT_SECRET=...
+
+# API Keys (Integrations / sistemas externos)
+# CSV separado por comas (sin espacios idealmente)
+VALID_API_KEYS=stg-collect-key-1,stg-collect-key-2
 
 # LLM API Keys
 OPENAI_API_KEY=...
@@ -967,6 +1057,22 @@ Cuando un administrador envía un mensaje desde **Detalles de Conversación**, e
 
 Esto evita que, cuando existen múltiples canales WhatsApp activos, el sistema envíe el mensaje por un canal equivocado.
 
+### Envío saliente con media (imagen/video/documento) + caption
+
+Además de texto, el envío saliente soporta **media URL pública** (ej: imagen) con caption usando la cola de WhatsApp:
+- El API de integraciones acepta `mediaUrl` + `mediaType`.
+- El `queue-service` procesa el job y, si detecta media, ejecuta `whatsappAdapter.sendMedia(...)`; si no, `sendMessage(...)`.
+
+**Nota:** el `mediaUrl` debe ser accesible públicamente por el proveedor WhatsApp (UltraMsg/Twilio/360dialog) para que el envío sea exitoso.
+
+### Logging VERBOSE (debug controlado por env flags)
+
+Para auditoría/diagnóstico (evitar en producción por PII), existen flags:
+- `LOG_INTEGRATION_CONTEXT_VALUES=true`
+- `LOG_INTEGRATION_OUTBOUND_MESSAGE_TEXT=true`
+- `LOG_EXTERNAL_CONTEXT_JSON=true`
+- `LOG_ENHANCED_SYSTEM_PROMPT=true`
+
 ---
 
 ## 📝 Notas Adicionales
@@ -993,6 +1099,6 @@ El sistema usa **UTC-5 (Ecuador)** como zona horaria predeterminada para:
 
 ---
 
-**Última actualización:** Diciembre 2025  
-**Versión del documento:** 1.0.0
+**Última actualización:** Enero 2026  
+**Versión del documento:** 1.1.0
 

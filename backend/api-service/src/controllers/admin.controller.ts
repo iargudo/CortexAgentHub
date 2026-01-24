@@ -3666,24 +3666,92 @@ export class AdminController {
         throw new AppError('VALIDATION_ERROR', 'El mensaje no puede estar vacío', 400);
       }
 
-      // Get conversation and channel config
-      const conversationResult = await this.db.query(`
+      // Get conversation first to check if it has original channel_config_id
+      const conversationQuery = await this.db.query(`
         SELECT 
-          c.id,
-          c.channel,
-          c.channel_user_id,
-          c.status,
-          cc.config as channel_config
-        FROM conversations c
-        LEFT JOIN channel_configs cc ON cc.channel_type = c.channel AND cc.active = true
-        WHERE c.id = $1
+          id,
+          channel,
+          channel_user_id,
+          status,
+          metadata
+        FROM conversations
+        WHERE id = $1
       `, [id]);
 
-      if (conversationResult.rows.length === 0) {
+      if (conversationQuery.rows.length === 0) {
         throw new AppError('NOT_FOUND', 'Conversación no encontrada', 404);
       }
 
-      const conversation = conversationResult.rows[0];
+      const conversationData = conversationQuery.rows[0];
+      
+      // Safely extract channel_config_id from metadata
+      // PostgreSQL JSONB fields are automatically parsed to JavaScript objects by pg driver
+      // But we need to handle cases where metadata might be null, undefined, or the field doesn't exist
+      let originalChannelId: string | undefined;
+      try {
+        const metadata = conversationData.metadata;
+        if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+          originalChannelId = metadata.channel_config_id;
+          // Ensure it's a string (UUID) and not null/undefined
+          if (originalChannelId && typeof originalChannelId !== 'string') {
+            originalChannelId = String(originalChannelId);
+          }
+          // Validate it's a valid UUID format (basic check)
+          if (originalChannelId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(originalChannelId)) {
+            logger.warn('Invalid UUID format for channel_config_id in conversation metadata', {
+              conversationId: id,
+              channelConfigId: originalChannelId,
+            });
+            originalChannelId = undefined;
+          }
+        }
+      } catch (error: any) {
+        logger.warn('Error extracting channel_config_id from conversation metadata', {
+          conversationId: id,
+          error: error.message,
+        });
+        originalChannelId = undefined;
+      }
+
+      // Get channel config - prioritize original channel if available
+      let channelConfigQuery: string;
+      let channelConfigParams: any[];
+
+      if (originalChannelId) {
+        // Use the original channel_config_id from metadata
+        channelConfigQuery = `
+          SELECT 
+            id as channel_config_id,
+            config as channel_config
+          FROM channel_configs
+          WHERE id = $1::uuid
+            AND channel_type = $2
+            AND active = true
+          LIMIT 1
+        `;
+        channelConfigParams = [originalChannelId, conversationData.channel];
+      } else {
+        // Fallback to any active channel of the same type
+        channelConfigQuery = `
+          SELECT 
+            id as channel_config_id,
+            config as channel_config
+          FROM channel_configs
+          WHERE channel_type = $1
+            AND active = true
+          LIMIT 1
+        `;
+        channelConfigParams = [conversationData.channel];
+      }
+
+      const channelConfigResult = await this.db.query(channelConfigQuery, channelConfigParams);
+      
+      // Combine conversation and channel config data
+      const conversation = {
+        ...conversationData,
+        channel_config: channelConfigResult.rows[0]?.channel_config || null,
+        channel_config_id: channelConfigResult.rows[0]?.channel_config_id || null,
+      };
 
       if (conversation.channel !== 'whatsapp') {
         throw new AppError('INVALID_CHANNEL', 'Solo se pueden enviar mensajes proactivos a WhatsApp', 400);
@@ -3692,6 +3760,14 @@ export class AdminController {
       if (!conversation.channel_config) {
         throw new AppError('CONFIG_NOT_FOUND', 'No hay configuración de canal WhatsApp activa', 400);
       }
+
+      // Log which channel is being used
+      logger.info('Sending proactive message', {
+        conversationId: id,
+        usingOriginalChannel: !!originalChannelId && originalChannelId === conversation.channel_config_id,
+        originalChannelId: originalChannelId || '(not stored)',
+        selectedChannelId: conversation.channel_config_id,
+      });
 
       // Get queue manager
       const queueManager = getQueueManager();

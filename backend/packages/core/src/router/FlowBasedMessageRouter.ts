@@ -88,61 +88,57 @@ export class FlowBasedMessageRouter {
       messageContent: routingMessage.content?.substring(0, 100),
     });
 
-    // Query database for active flows matching the channel type via flow_channels
-    // If channelId is provided, prioritize exact match by channel_config_id
-    // Priority: 1) Exact channel match by id, 2) Any channel of this type (fallback)
-    // Use conditional query based on whether requestedChannelId is provided
-    let query: string;
-    let queryParams: any[];
-    
+    // Query database for active flows matching the channel type via flow_channels.
+    // CRITICAL: if requestedChannelId is provided, DO NOT consider other channels.
+    // This prevents cross-brand routing when multiple WhatsApp channels exist (e.g., PuntoNet vs Alfanet).
+    // Fallback: if there are no flows for the requested channel, then consider any channel of this type.
+    const baseSelect = `SELECT DISTINCT
+          f.*,
+          l.provider as llm_provider,
+          l.model as llm_model,
+          l.config as llm_config,
+          c.channel_type,
+          c.config as channel_config,
+          c.id as channel_config_id
+        FROM orchestration_flows f
+        JOIN llm_configs l ON f.llm_id = l.id
+        JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
+        JOIN channel_configs c ON fc.channel_id = c.id
+        WHERE c.channel_type = $1
+          AND f.active = true
+          AND l.active = true
+          AND c.is_active = true`;
+
+    let result;
     if (requestedChannelId) {
-      // When channelId is provided, prioritize exact match
-      query = `SELECT DISTINCT
-          f.*,
-          l.provider as llm_provider,
-          l.model as llm_model,
-          l.config as llm_config,
-          c.channel_type,
-          c.config as channel_config,
-          c.id as channel_config_id,
-          CASE 
-            WHEN c.id = $2::uuid THEN 1
-            ELSE 2
-          END as channel_match_priority
-        FROM orchestration_flows f
-        JOIN llm_configs l ON f.llm_id = l.id
-        JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
-        JOIN channel_configs c ON fc.channel_id = c.id
-        WHERE c.channel_type = $1
-          AND f.active = true
-          AND l.active = true
-          AND c.is_active = true
-        ORDER BY channel_match_priority ASC, f.priority ASC`;
-      queryParams = [message.channelType, requestedChannelId];
+      // First pass: only the requested channel_config_id
+      result = await this.db.query(
+        `${baseSelect}
+          AND c.id = $2::uuid
+        ORDER BY f.priority ASC`,
+        [message.channelType, requestedChannelId]
+      );
+
+      if (result.rows.length === 0) {
+        logger.warn('⚠️  No flows found for requested channel id, falling back to any channel of this type', {
+          channelType: message.channelType,
+          requestedChannelId,
+        });
+        // Fallback pass: any channel of this type
+        result = await this.db.query(
+          `${baseSelect}
+          ORDER BY f.priority ASC`,
+          [message.channelType]
+        );
+      }
     } else {
-      // When no channelId provided, return all channels of this type (no priority comparison)
-      query = `SELECT DISTINCT
-          f.*,
-          l.provider as llm_provider,
-          l.model as llm_model,
-          l.config as llm_config,
-          c.channel_type,
-          c.config as channel_config,
-          c.id as channel_config_id,
-          2 as channel_match_priority
-        FROM orchestration_flows f
-        JOIN llm_configs l ON f.llm_id = l.id
-        JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
-        JOIN channel_configs c ON fc.channel_id = c.id
-        WHERE c.channel_type = $1
-          AND f.active = true
-          AND l.active = true
-          AND c.is_active = true
-        ORDER BY f.priority ASC`;
-      queryParams = [message.channelType];
+      // No explicit channel requested: any channel of this type
+      result = await this.db.query(
+        `${baseSelect}
+        ORDER BY f.priority ASC`,
+        [message.channelType]
+      );
     }
-    
-    const result = await this.db.query(query, queryParams);
 
     if (result.rows.length === 0) {
       logger.warn('❌ No active flows found for channel', {
@@ -159,7 +155,6 @@ export class FlowBasedMessageRouter {
         name: row.name,
         channel_config_id: row.channel_config_id,
         priority: row.priority,
-        channel_match_priority: row.channel_match_priority,
       }))
     });
     
