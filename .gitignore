@@ -50,8 +50,7 @@ temp/
 .dockerignore
 
 # Deploy scripts (local / env-specific, do not commit)
-deploy-docker-prd.sh
-deploy-docker-stg.sh
+deploy-docker*.sh
 
 # Misc
 .cache/
