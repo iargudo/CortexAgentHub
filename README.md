@@ -393,60 +393,14 @@ ROI: 97% ahorro mensual
 
 ---
 
-## 🔄 Roadmap de Implementación
-
-### **Fase 1: Piloto (Semana 1-2)**
-- ✅ Instalación en servidor de desarrollo
-- ✅ Configuración de 1 canal (WebChat o WhatsApp)
-- ✅ Creación de 1 agente básico (FAQ)
-- ✅ Pruebas con equipo interno
-- ✅ Ajustes basados en feedback
-
-**Output**: Sistema funcional con 100 interacciones de prueba
-
----
-
-### **Fase 2: Beta Controlada (Semana 3-4)**
-- ✅ Apertura a 10-20% de clientes reales
-- ✅ Monitoreo intensivo de conversaciones
-- ✅ Ajuste de system prompts
-- ✅ Creación de 2-3 tools específicas
-- ✅ Definición de KPIs
-
-**Output**: 500-1000 conversaciones reales analizadas
-
----
-
-### **Fase 3: Lanzamiento Gradual (Mes 2)**
-- ✅ Expansión a 50% de tráfico
-- ✅ Configuración de múltiples canales
-- ✅ Creación de agentes especializados
-- ✅ Integración con CRM/ERP
-- ✅ Training del equipo de soporte
-
-**Output**: Sistema manejando mayoría del tráfico
-
----
-
-### **Fase 4: Operación Plena (Mes 3+)**
-- ✅ 100% de consultas pasan por AI
-- ✅ Escalamiento automático
-- ✅ Optimización continua de agentes
-- ✅ Expansión de integraciones
-- ✅ Análisis de datos y mejoras
-
-**Output**: Sistema autónomo con supervisión mínima
-
----
-
 ## 📋 Tabla de Contenidos
 
-- [Valor de Negocio](#-por-qué-cortexmcp)
+- [Valor de Negocio](#-por-qué-cortexagenthub)
 - [Casos de Uso por Industria](#-casos-de-uso-por-industria)
 - [Escenarios de Implementación](#-escenarios-de-implementación)
 - [Beneficios Medibles](#-beneficios-medibles)
-- [Roadmap de Implementación](#-roadmap-de-implementación)
-- [Características Principales](#-características-principales)
+- [Características del Sistema](#-características-del-sistema)
+  - [Características de IA](#-características-de-ia)
 - [Arquitectura del Sistema](#️-arquitectura-del-sistema)
 - [Estructura del Monorepo](#-estructura-del-monorepo)
 - [Tecnologías Utilizadas](#-tecnologías-utilizadas)
@@ -464,7 +418,7 @@ ROI: 97% ahorro mensual
 
 ---
 
-## 🌟 Características Principales
+## 🌟 Características del Sistema
 
 ### **Orquestación Multi-Canal**
 - ✅ **WhatsApp** - Integración con UltrMsg y Twilio
@@ -472,12 +426,60 @@ ROI: 97% ahorro mensual
 - ✅ **WebChat** - WebSocket en tiempo real con JWT
 - ✅ **Email** - SMTP/IMAP con soporte HTML y adjuntos
 
-### **Multi-Provider LLM**
+### **🧠 Características de IA**
+
+#### **Multi-LLM y Proveedores**
 - ✅ **OpenAI** - GPT-4, GPT-4 Turbo, GPT-3.5
 - ✅ **Anthropic** - Claude 3.5 Sonnet, Opus, Haiku
 - ✅ **Ollama** - Modelos locales (Llama, Mistral, etc.)
 - ✅ **Google** - Gemini Pro y Ultra
 - ✅ **HuggingFace** - Inference API
+- ✅ **LM Studio** - Modelos locales vía API
+
+Cada agente puede usar un **LLM distinto**: ventas con GPT-4, soporte con Claude, o un modelo local en Ollama para datos sensibles. Sin vendor lock-in.
+
+#### **Parámetros de Modelo por Agente**
+- **Temperature** (0–1): controla creatividad vs. determinismo. Bajo para FAQs y datos; alto para copy o ideas.
+- **Max Tokens**: límite de longitud de respuesta por mensaje.
+- **System Prompt**: instrucciones que definen personalidad, tono, reglas y conocimiento base del agente.
+
+#### **Load Balancing y Resiliencia**
+- **Estrategias**: round-robin, least-latency, least-cost, priority.
+- **Circuit Breaker**: ante fallos reiterados, el proveedor se desactiva temporalmente y se usa fallback; se reintenta tras un timeout configurable.
+- **Failover**: si un LLM no responde, el gateway puede pasar a otro proveedor según configuración.
+
+#### **Token Usage y Cost Tracking**
+- Conteo de **tokens** (input/output) por llamada a LLM.
+- **Cálculo de coste** por mensaje según precios por 1K tokens del modelo.
+- **Persistencia** en PostgreSQL por conversación (provider, model, tokens, cost) para análisis y facturación.
+- Estadísticas agregadas por proveedor en el Dashboard.
+
+#### **Contexto y Memoria de Conversación**
+- **ContextManager**: Redis como store principal; PostgreSQL para persistencia a largo plazo.
+- **Historial** de mensajes (usuario + asistente) enviado al LLM en cada turno para continuidad.
+- **TTL** y **maxHistoryLength** configurables; compresión opcional para conversaciones largas.
+- **SessionId** por conversación (p. ej. `channelType + channelUserId`); el orquestador carga/actualiza contexto en cada request.
+
+#### **RAG (Retrieval-Augmented Generation)**
+- **Bases de conocimiento** por agente: documentos (manual, URL, upload) que se fragmentan, embedan y almacenan en **pgvector**.
+- **Embeddings**: múltiples modelos (OpenAI, Cohere, etc.) configurables por knowledge base; misma dimensionalidad para búsqueda.
+- **Búsqueda semántica**: cosine similarity sobre vectores; umbral de similitud y `max_results` configurables.
+- **Inyección en system prompt**: los chunks relevantes se añaden al system prompt del agente antes de llamar al LLM, sin cambiar el flujo de tools.
+- **Prioridad por knowledge base**: cada KB puede tener prioridad; resultados ordenados por relevancia y prioridad.
+- **RAGService** orquesta embedding de la query, búsqueda en cada KB asociada al flow y formateo del contexto para el prompt.
+
+#### **Tools y Function Calling**
+- **Tools dinámicas**: funciones JavaScript en DB que el LLM puede invocar (p. ej. `get_weather`, `send_leadbox_lead`).
+- **ExecutionEngine** seguro: `fetch`, `logger`, `db` (solo SELECT), `utils`; sin `require` ni módulos arbitrarios.
+- **Hot-reload**: cambios en tools sin reiniciar servicios.
+- **Permisos por canal**: cada tool se asocia a canales concretos; el orquestador solo ofrece al LLM las tools permitidas para ese canal.
+- **Límite de ejecuciones** por mensaje (`maxToolExecutions`) para evitar bucles.
+
+#### **Routing de Agentes (Flow-Based)**
+- **FlowBasedMessageRouter**: selección de agente por canal, `instance_identifier` (multi-instancia) y **regex** sobre el mensaje.
+- **Prioridad**: si varias reglas coinciden, gana la de mayor prioridad (menor número).
+- **Config por flow**: LLM, model, system prompt, temperature, max tokens, tools habilitadas.
+- **Multi-agente en un mismo canal**: p. ej. ventas para “precio/comprar”, soporte para “ayuda/error”, y un agente genérico como fallback.
 
 ### **Sistema de Tools Dinámicas**
 - ✅ **100% Database-Driven** - Sin código hardcodeado
@@ -485,7 +487,7 @@ ROI: 97% ahorro mensual
 - ✅ **Hot-Reload** - Cambios instantáneos sin reiniciar
 - ✅ **ExecutionEngine** - Ejecución segura de JavaScript
 - ✅ **Testing Integrado** - Prueba tools en tiempo real
-- ✅ **9 Tools Pre-configuradas** - Weather, Email, Search, etc.
+- ✅ **Tools Pre-configuradas** - Weather, Email, Search, Leadbox, SQL, Knowledge Base, etc.
 
 ### **Agentes Especializados**
 - ✅ **UI Visual** - Configuración sin código
@@ -494,21 +496,23 @@ ROI: 97% ahorro mensual
 - ✅ **Routing Inteligente** - Basado en regex y prioridades
 - ✅ **Multi-Instancia** - Múltiples números WhatsApp/Telegram
 
-### **Admin UI Profesional**
-- ✅ **Dashboard** - Métricas en tiempo real
+### **Admin UI**
+- ✅ **Dashboard** - Métricas en tiempo real, tokens y costes
 - ✅ **Channels** - Gestión de canales de comunicación
 - ✅ **LLMs** - Configuración de proveedores
+- ✅ **Embedding Models** - Modelos para RAG y knowledge bases
+- ✅ **Knowledge Bases** - Documentos, chunking y embeddings
 - ✅ **Tools** - Editor de herramientas dinámicas
 - ✅ **Agents** - Configuración visual de agentes
 - ✅ **Playground** - Pruebas interactivas
-- ✅ **Analytics** - Estadísticas y logs
+- ✅ **Conversations, Logs, Queues** - Operación y depuración
 
-### **Características Técnicas Avanzadas**
-- ✅ **Load Balancer** - Round-robin, least-latency, least-cost
+### **Características Técnicas**
+- ✅ **Load Balancer** - Round-robin, least-latency, least-cost, priority
 - ✅ **Circuit Breaker** - Recuperación automática de fallos
 - ✅ **Rate Limiting** - Por usuario y por tool
 - ✅ **Context Management** - Redis + PostgreSQL
-- ✅ **Vector Search** - pgvector para embeddings
+- ✅ **Vector Search** - pgvector (HNSW) para embeddings
 - ✅ **Cost Tracking** - Seguimiento de costos por token
 - ✅ **BullMQ Queues** - Procesamiento asíncrono
 
