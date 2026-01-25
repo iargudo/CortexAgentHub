@@ -1271,9 +1271,7 @@ MIT License - Ver archivo LICENSE para detalles
 ## 📞 Soporte
 
 Para preguntas o issues:
-- 📧 Email: support@cortexmcp.com
-- 🐛 GitHub Issues: [github.com/your-org/cortex-mcp/issues](https://github.com/your-org/cortex-mcp/issues)
-- 📖 Docs: [docs.cortexmcp.com](https://docs.cortexmcp.com)
+- 📧 Email: iargudo@gmail.com
 
 ---
 
@@ -1287,14 +1285,3 @@ Para preguntas o issues:
 - [React Documentation](https://react.dev/)
 - [pgvector Guide](https://github.com/pgvector/pgvector)
 
----
-
-**🚀 Estado del Proyecto**: ✅ **100% Funcional - Producción**
-
-**Última Actualización**: Octubre 30, 2025
-
-**Versión**: 1.0.0
-
----
-
-*Construido con ❤️ para democratizar el acceso a IA conversacional multi-canal*
