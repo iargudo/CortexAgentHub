@@ -1235,20 +1235,6 @@ Todos los canales implementan `IChannelAdapter`:
 - Gestionan webhooks y conexiones real-time
 - Formatean respuestas para cada canal
 
----
-
-## 📊 Estadísticas del Proyecto
-
-```
-Total de Packages:      10
-Líneas de TypeScript:   ~25,000
-Archivos .ts:           ~150
-Tools Dinámicas:        9
-Providers LLM:          5
-Canales:                4
-Páginas Admin UI:       7
-Endpoints API:          ~30
-```
 
 ---
 
