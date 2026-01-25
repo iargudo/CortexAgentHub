@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 .pnpm-store/
+package-lock.json
 
 # Build outputs
 dist/
@@ -47,6 +48,10 @@ temp/
 
 # Docker
 .dockerignore
+
+# Deploy scripts (local / env-specific, do not commit)
+deploy-docker-prd.sh
+deploy-docker-stg.sh
 
 # Misc
 .cache/
