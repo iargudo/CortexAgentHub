@@ -49,8 +49,9 @@ temp/
 # Docker
 .dockerignore
 
-# Deploy scripts (local / env-specific, do not commit)
+# Deploy / setup scripts (local / env-specific, do not commit)
 deploy-docker*.sh
+setup-local.sh
 
 # Misc
 .cache/
