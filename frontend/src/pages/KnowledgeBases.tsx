@@ -279,7 +279,7 @@ export function KnowledgeBases() {
     setSelectedKB(null);
   };
 
-  const closeModal = () => {
+  const closeModal = (): void => {
     setIsModalOpen(false);
     setEditingKB(null);
   };
@@ -460,138 +460,130 @@ export function KnowledgeBases() {
       </div>
 
       {knowledgeBases && knowledgeBases.length > 0 ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {knowledgeBases.map((kb: KnowledgeBase) => (
             <div
               key={kb.id}
-              className="bg-white border border-gray-200 rounded-xl shadow-sm hover:shadow-md transition-all duration-200 flex flex-col h-full overflow-hidden"
+              className="bg-white border border-gray-200 rounded-xl shadow-sm hover:shadow-md transition-all duration-200 flex flex-col overflow-hidden"
             >
-              {/* Header */}
-              <div className="p-5 bg-gradient-to-br from-primary-50 to-primary-100/50 border-b border-gray-200">
-                <div className="flex items-start justify-between mb-3">
-                  <div className="p-2.5 bg-white rounded-lg shadow-sm">
-                    <Book className="text-primary-600" size={20} />
+              {/* Header compacto */}
+              <div className="p-4 border-b border-gray-100">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="p-2 bg-primary-50 rounded-lg shrink-0">
+                    <Book className="text-primary-600" size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="font-semibold text-gray-900 truncate">{kb.name}</h3>
+                    <p className="text-xs text-gray-500 truncate">
+                      {kb.description || 'Sin descripción'}
+                    </p>
                   </div>
                   <span
-                    className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 ${
-                      kb.active 
-                        ? 'bg-green-100 text-green-700' 
-                        : 'bg-gray-100 text-gray-600'
+                    className={`shrink-0 px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1 ${
+                      kb.active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
                     }`}
                   >
-                    {kb.active ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
-                    {kb.active ? 'Active' : 'Inactive'}
+                    {kb.active ? <CheckCircle2 size={10} /> : <XCircle size={10} />}
+                    {kb.active ? 'Activo' : 'Inactivo'}
                   </span>
                 </div>
-                <h3 className="font-bold text-lg text-gray-900 mb-1 line-clamp-1">{kb.name}</h3>
-                <p className="text-sm text-gray-600 line-clamp-2 min-h-[2.5rem]">
-                  {kb.description || 'No description provided'}
-                </p>
               </div>
 
-              {/* Stats */}
-              <div className="p-5 flex-1">
+              {/* Stats en una sola fila */}
+              <div className="p-4">
                 {kb.stats ? (
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between p-3 bg-blue-50 rounded-lg">
-                      <div className="flex items-center gap-2">
-                        <FileText className="text-blue-600" size={18} />
-                        <span className="text-sm font-medium text-gray-700">Documents</span>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-lg font-bold text-gray-900">
-                          {kb.stats.documents.completed}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-lg">
+                        <FileText className="text-blue-600 shrink-0" size={16} />
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900">
+                            {kb.stats.documents.completed}/{kb.stats.documents.total}
+                          </div>
+                          <div className="text-xs text-gray-500">Docs</div>
                         </div>
-                        <div className="text-xs text-gray-500">
-                          / {kb.stats.documents.total} total
+                      </div>
+                      <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-lg">
+                        <Sparkles className="text-purple-600 shrink-0" size={16} />
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900">
+                            {kb.stats.embeddings.total.toLocaleString()}
+                          </div>
+                          <div className="text-xs text-gray-500">Embeddings</div>
                         </div>
                       </div>
                     </div>
-
-                    <div className="flex items-center justify-between p-3 bg-purple-50 rounded-lg">
-                      <div className="flex items-center gap-2">
-                        <Sparkles className="text-purple-600" size={18} />
-                        <span className="text-sm font-medium text-gray-700">Embeddings</span>
-                      </div>
-                      <div className="text-lg font-bold text-gray-900">
-                        {kb.stats.embeddings.total.toLocaleString()}
-                      </div>
-                    </div>
-
-                    {/* Status indicators */}
-                    <div className="space-y-2 pt-2 border-t border-gray-200">
+                    {/* Estado en una línea */}
+                    <div className="flex items-center gap-2">
                       {kb.stats.documents.processing > 0 && (
-                        <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 p-2 rounded-lg">
-                          <Loader2 size={16} className="animate-spin" />
-                          <span className="font-medium">{kb.stats.documents.processing} processing</span>
-                        </div>
+                        <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded">
+                          <Loader2 size={12} className="animate-spin" />
+                          {kb.stats.documents.processing} procesando
+                        </span>
                       )}
                       {kb.stats.documents.failed > 0 && (
-                        <div className="flex items-center gap-2 text-sm text-red-700 bg-red-50 p-2 rounded-lg">
-                          <AlertCircle size={16} />
-                          <span className="font-medium">{kb.stats.documents.failed} failed</span>
-                        </div>
+                        <span className="inline-flex items-center gap-1 text-xs text-red-700 bg-red-50 px-2 py-1 rounded">
+                          <AlertCircle size={12} />
+                          {kb.stats.documents.failed} fallidos
+                        </span>
                       )}
                       {kb.stats.documents.processing === 0 && kb.stats.documents.failed === 0 && (
-                        <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 p-2 rounded-lg">
-                          <CheckCircle2 size={16} />
-                          <span className="font-medium">All documents ready</span>
-                        </div>
+                        <span className="inline-flex items-center gap-1 text-xs text-green-700 bg-green-50 px-2 py-1 rounded">
+                          <CheckCircle2 size={12} />
+                          Listo
+                        </span>
                       )}
                     </div>
                   </div>
                 ) : (
-                  <div className="text-center py-6 text-gray-500">
-                    <FileText size={32} className="mx-auto mb-3 opacity-40" />
-                    <p className="text-sm font-medium text-gray-600 mb-1">No documents yet</p>
-                    <p className="text-xs text-gray-500 mb-4">
-                      Add documents to start building your knowledge base
-                    </p>
+                  <div className="text-center py-4">
+                    <FileText size={24} className="mx-auto mb-2 text-gray-400" />
+                    <p className="text-xs text-gray-500 mb-3">Sin documentos</p>
                     <button
                       onClick={() => openDocumentModal(kb)}
                       className="text-xs px-3 py-1.5 bg-primary-50 text-primary-600 rounded-lg hover:bg-primary-100 transition-colors font-medium"
                     >
-                      Add First Document
+                      Añadir documento
                     </button>
                   </div>
                 )}
               </div>
 
-              {/* Actions */}
-              <div className="p-4 bg-gray-50 border-t border-gray-200 flex gap-2">
+              {/* Actions más compactas */}
+              <div className="p-3 bg-gray-50 border-t border-gray-100 flex flex-wrap gap-2 mt-auto">
                 <button
                   onClick={() => openDocumentsView(kb)}
-                  className="flex-1 px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                  title="View Documents"
+                  className="flex-1 min-w-0 px-2 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-medium flex items-center justify-center gap-1"
+                  title="Ver documentos"
                 >
-                  <FolderOpen size={16} />
-                  View
+                  <FolderOpen size={14} />
+                  Ver
                 </button>
                 <button
                   onClick={() => openDocumentModal(kb)}
-                  className="flex-1 px-3 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors text-sm font-medium flex items-center justify-center gap-2"
-                  title="Add Document"
+                  className="flex-1 min-w-0 px-2 py-1.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors text-xs font-medium flex items-center justify-center gap-1"
+                  title="Añadir documento"
                 >
-                  <Upload size={16} />
-                  Add
+                  <Upload size={14} />
+                  Añadir
                 </button>
                 <button
                   onClick={() => openEditModal(kb)}
-                  className="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors"
-                  title="Edit"
+                  className="shrink-0 p-1.5 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors"
+                  title="Editar"
                 >
-                  <Edit size={16} className="text-gray-600" />
+                  <Edit size={14} className="text-gray-600" />
                 </button>
                 <button
                   onClick={() => {
-                    if (confirm('Are you sure you want to delete this knowledge base? This will delete all documents and embeddings.')) {
+                    if (confirm('¿Eliminar esta base de conocimiento? Se borrarán todos los documentos y embeddings.')) {
                       deleteMutation.mutate(kb.id);
                     }
                   }}
-                  className="px-3 py-2 border border-red-300 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
-                  title="Delete"
+                  className="shrink-0 p-1.5 border border-red-300 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+                  title="Eliminar"
                 >
-                  <Trash2 size={16} />
+                  <Trash2 size={14} />
                 </button>
               </div>
             </div>

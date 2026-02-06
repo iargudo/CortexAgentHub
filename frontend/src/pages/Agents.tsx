@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { api, getChatClientUrl } from '@/services/api';
 import { AgentCanvas } from '@/components/AgentCanvas';
 import { Agent, Tool, LLM, Channel } from '@/types/agent';
@@ -64,6 +66,24 @@ export function Agents() {
     },
   });
 
+  // Toggle flow active/inactive from card
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const toggleActiveMutation = useMutation({
+    mutationFn: ({ id, active }: { id: string; active: boolean }) =>
+      api.updateFlow(id, { active }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['agents'] });
+      queryClient.invalidateQueries({ queryKey: ['flows'] });
+      setTogglingId(null);
+    },
+    onError: () => setTogglingId(null),
+  });
+
+  const handleToggleActive = (agent: Agent) => {
+    setTogglingId(agent.id);
+    toggleActiveMutation.mutate({ id: agent.id, active: !agent.active });
+  };
+
   const handleDelete = async (id: string) => {
     if (confirm('¿Estás seguro de eliminar este agente?')) {
       await deleteMutation.mutateAsync(id);
@@ -97,7 +117,7 @@ export function Agents() {
       </div>
 
       {/* Agents Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {agents?.map((agent: Agent) => (
           <AgentCard
             key={agent.id}
@@ -105,6 +125,7 @@ export function Agents() {
             onEdit={() => setEditingAgent(agent)}
             onDelete={() => handleDelete(agent.id)}
             onViewCanvas={() => openCanvas(agent)}
+            onToggleActive={() => handleToggleActive(agent)}
             onCopyChatUrl={() => {
               const chatUrl = getChatClientUrl(agent.id);
               navigator.clipboard.writeText(chatUrl);
@@ -112,6 +133,7 @@ export function Agents() {
               setTimeout(() => setCopiedChatUrl(null), 2000);
             }}
             copiedChatUrl={copiedChatUrl}
+            togglingId={togglingId}
           />
         ))}
       </div>
@@ -384,131 +406,164 @@ function AgentCard({
   onDelete,
   onViewCanvas,
   onCopyChatUrl,
+  onToggleActive,
   copiedChatUrl,
+  togglingId,
 }: {
   agent: Agent;
   onEdit: () => void;
   onDelete: () => void;
   onViewCanvas: () => void;
   onCopyChatUrl: () => void;
+  onToggleActive: () => void;
   copiedChatUrl: string | null;
+  togglingId: string | null;
 }) {
-  // Check if agent has webchat channel
   const hasWebchat = agent.channels?.some((ch) => ch.channel_type === 'webchat');
+  const channelCount = agent.channel_count ?? agent.channels?.length ?? 0;
+  const toolsCount = agent.enabled_tools?.length ?? 0;
+  const isToggling = togglingId === agent.id;
+
   return (
-    <div className="card flex flex-col h-full p-3">
-      <div className="flex items-start justify-between mb-2">
-        <div className="p-1.5 bg-blue-100 rounded-lg">
-          <Bot className="text-blue-600" size={16} />
+    <div className="bg-white border border-gray-200 rounded-xl shadow-sm hover:shadow-md transition-all duration-200 flex flex-col overflow-hidden">
+      {/* Header compacto */}
+      <div className="p-4 border-b border-gray-100">
+        <div className="flex items-center gap-3 mb-1">
+          <div className="p-2 bg-blue-50 rounded-lg shrink-0">
+            <Bot className="text-blue-600" size={18} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="font-semibold text-gray-900 truncate">{agent.name}</h3>
+            <p className="text-xs text-gray-500 truncate">
+              {agent.description || 'Sin descripción'}
+            </p>
+          </div>
+          {/* Switch Activo/Inactivo en la tarjeta */}
+          <div className="shrink-0 flex items-center gap-2">
+            <span className="text-xs text-gray-500 whitespace-nowrap">
+              {agent.active ? 'Activo' : 'Inactivo'}
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={agent.active}
+              aria-label={agent.active ? 'Desactivar agente' : 'Activar agente'}
+              disabled={isToggling}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleActive();
+              }}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+                agent.active ? 'bg-green-500' : 'bg-gray-200'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition ${
+                  agent.active ? 'translate-x-5' : 'translate-x-0.5'
+                }`}
+                style={{ marginTop: 2 }}
+              />
+              {isToggling && (
+                <span className="absolute inset-0 flex items-center justify-center">
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                </span>
+              )}
+            </button>
+          </div>
         </div>
-        <span
-          className={`badge text-xs ${
-            agent.active ? 'badge-success' : 'badge-error'
-          }`}
-        >
-          {agent.active ? <Check size={10} /> : <X size={10} />}
-        </span>
+        {agent.channels && agent.channels.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            {agent.channels.slice(0, 3).map((ch) => (
+              <span
+                key={ch.id}
+                className="inline-block px-1.5 py-0.5 bg-blue-50 text-blue-700 rounded text-[10px] font-medium"
+                title={ch.channel_name}
+              >
+                {ch.channel_type.toUpperCase()}
+              </span>
+            ))}
+            {agent.channels.length > 3 && (
+              <span className="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
+                +{agent.channels.length - 3}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      <div className="flex-1 min-h-0">
-        <h3 className="font-semibold text-sm mb-1 line-clamp-1">{agent.name}</h3>
-        <p className="text-xs text-gray-600 mb-2 line-clamp-1">
-          {agent.description || 'Sin descripción'}
-        </p>
+      {/* Stats en grid 2x2 */}
+      <div className="p-4">
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
+            <span className="text-gray-500">Canales</span>
+            <span className="font-semibold text-gray-900">{channelCount}</span>
+          </div>
+          <div className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
+            <span className="text-gray-500">Tools</span>
+            <span className="font-semibold text-gray-900">{toolsCount}</span>
+          </div>
+          <div className="col-span-2 flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-lg">
+            <span className="text-gray-500">LLM</span>
+            <span className="font-semibold text-gray-900 truncate" title={agent.llm_provider}>
+              {agent.llm_provider || '—'}
+            </span>
+          </div>
+        </div>
         {agent.id && (
-          <div className="flex items-center text-xs text-gray-500 mb-2">
-            <span title={agent.id}>ID: {agent.id.substring(0, 8)}...</span>
+          <div className="flex items-center gap-1 mt-2 text-[10px] text-gray-400">
+            <span title={agent.id}>{agent.id.substring(0, 8)}…</span>
             <button
               onClick={(e) => {
                 e.stopPropagation();
                 navigator.clipboard.writeText(agent.id);
-                alert('Flow ID copiado al portapapeles!');
+                alert('Flow ID copiado al portapapeles');
               }}
-              className="ml-1 p-1 hover:bg-gray-100 rounded transition-colors"
-              title="Copiar Flow ID"
+              className="p-0.5 hover:bg-gray-200 rounded"
+              title="Copiar ID"
             >
-              <Copy size={12} />
+              <Copy size={10} />
             </button>
-          </div>
-        )}
-        <div className="space-y-0.5 text-xs">
-          <div className="flex justify-between">
-            <span className="text-gray-500">Canales:</span>
-            <span className="font-medium truncate ml-2" title={agent.channels?.map(c => c.channel_type).join(', ')}>
-              {agent.channel_count || agent.channels?.length || 0}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500">LLM:</span>
-            <span className="font-medium truncate ml-2">{agent.llm_provider}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500">Tools:</span>
-            <span className="font-medium truncate ml-2">{agent.enabled_tools?.length || 0}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-gray-500">Knowledge:</span>
-            <span className="font-medium truncate ml-2">
-              {/* This will be loaded separately if needed */}
-            </span>
-          </div>
-        </div>
-        {agent.channels && agent.channels.length > 0 && (
-          <div className="mt-2 pt-2 border-t border-gray-200">
-            <div className="flex flex-wrap gap-1">
-              {agent.channels.slice(0, 3).map((ch) => (
-                <span
-                  key={ch.id}
-                  className="inline-block px-1.5 py-0.5 bg-blue-100 text-blue-800 rounded text-[10px] font-medium"
-                  title={ch.channel_name}
-                >
-                  {ch.channel_type.toUpperCase()}
-                </span>
-              ))}
-              {agent.channels.length > 3 && (
-                <span className="inline-block px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
-                  +{agent.channels.length - 3}
-                </span>
-              )}
-            </div>
           </div>
         )}
       </div>
 
-      <div className="flex gap-2 pt-2 border-t mt-2">
+      {/* Acciones */}
+      <div className="p-3 bg-gray-50 border-t border-gray-100 flex flex-wrap gap-2 mt-auto">
+        <button
+          onClick={onViewCanvas}
+          className="flex-1 min-w-0 px-2 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-medium flex items-center justify-center gap-1"
+          title="Ver orquestación"
+        >
+          <GitBranch size={14} />
+          Ver
+        </button>
+        <button
+          onClick={onEdit}
+          className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors text-xs font-medium flex items-center justify-center gap-1"
+          title="Editar"
+        >
+          <Edit size={14} className="text-gray-600" />
+          Editar
+        </button>
         {hasWebchat && (
           <button
             onClick={onCopyChatUrl}
-            className="p-2 hover:bg-green-50 rounded transition-colors"
-            title="Copiar URL del Chat Client"
+            className="shrink-0 p-1.5 border border-green-300 text-green-600 rounded-lg hover:bg-green-50 transition-colors"
+            title="Copiar URL del chat"
           >
             {copiedChatUrl === agent.id ? (
-              <Check size={14} className="text-green-600" />
+              <Check size={14} />
             ) : (
-              <Link size={14} className="text-green-600" />
+              <Link size={14} />
             )}
           </button>
         )}
         <button
-          onClick={onViewCanvas}
-          className="p-2 hover:bg-blue-50 rounded transition-colors"
-          title="Ver Orquestación"
-        >
-          <GitBranch size={14} className="text-blue-600" />
-        </button>
-        <button
-          onClick={onEdit}
-          className="p-2 hover:bg-gray-100 rounded transition-colors"
-          title="Editar"
-        >
-          <Edit size={14} className="text-gray-600" />
-        </button>
-        <button
           onClick={onDelete}
-          className="p-2 hover:bg-red-50 rounded transition-colors"
+          className="shrink-0 p-1.5 border border-red-300 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
           title="Eliminar"
         >
-          <Trash2 size={14} className="text-red-600" />
+          <Trash2 size={14} />
         </button>
       </div>
     </div>
@@ -976,8 +1031,46 @@ function AgentModal({
                 </div>
 
                 {showPromptPreview ? (
-                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 whitespace-pre-wrap text-sm">
-                    {formData.system_prompt || 'No hay system prompt configurado'}
+                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-sm prose prose-sm max-w-none prose-headings:text-gray-900 prose-p:text-gray-700 prose-ul:text-gray-700 prose-ol:text-gray-700 prose-code:text-gray-800 prose-code:bg-gray-200 prose-code:px-1 prose-code:rounded prose-pre:bg-gray-800 prose-pre:text-gray-100 [&_table]:w-full [&_table]:border-collapse [&_table]:my-3 [&_th]:border [&_th]:border-gray-300 [&_th]:bg-gray-200 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_td]:border [&_td]:border-gray-300 [&_td]:px-3 [&_td]:py-2 [&_td]:bg-white">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        code: ({ node, inline, className, children, ...props }: any) =>
+                          inline ? (
+                            <code className="bg-gray-200 px-1 rounded text-gray-800" {...props}>
+                              {children}
+                            </code>
+                          ) : (
+                            <code className="block p-3 bg-gray-800 text-gray-100 rounded-lg overflow-x-auto text-xs" {...props}>
+                              {children}
+                            </code>
+                          ),
+                        table: ({ children, ...props }) => (
+                          <div className="overflow-x-auto my-3">
+                            <table className="w-full border-collapse border border-gray-300" {...props}>
+                              {children}
+                            </table>
+                          </div>
+                        ),
+                        thead: ({ children, ...props }) => (
+                          <thead className="bg-gray-200" {...props}>{children}</thead>
+                        ),
+                        tbody: ({ children, ...props }) => (
+                          <tbody {...props}>{children}</tbody>
+                        ),
+                        tr: ({ children, ...props }) => (
+                          <tr className="border-b border-gray-300 last:border-b-0" {...props}>{children}</tr>
+                        ),
+                        th: ({ children, ...props }) => (
+                          <th className="border border-gray-300 px-3 py-2 text-left font-semibold text-gray-900" {...props}>{children}</th>
+                        ),
+                        td: ({ children, ...props }) => (
+                          <td className="border border-gray-300 px-3 py-2 text-gray-700 bg-white" {...props}>{children}</td>
+                        ),
+                      }}
+                    >
+                      {formData.system_prompt || 'No hay system prompt configurado'}
+                    </ReactMarkdown>
                   </div>
                 ) : (
                   <textarea

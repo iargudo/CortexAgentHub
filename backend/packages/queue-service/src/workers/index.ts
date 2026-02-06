@@ -3,6 +3,7 @@ import { WebhookProcessingWorker } from './WebhookProcessingWorker';
 import { EmailSendingWorker } from './EmailSendingWorker';
 import { DocumentProcessingWorker } from './DocumentProcessingWorker';
 import { WhatsAppSendingWorker } from './WhatsAppSendingWorker';
+import { WhatsAppWebhookIncomingWorker } from './WhatsAppWebhookIncomingWorker';
 import { createLogger } from '@cortex/shared';
 
 const logger = createLogger('WorkerManager');
@@ -91,3 +92,4 @@ export * from './WebhookProcessingWorker';
 export * from './EmailSendingWorker';
 export * from './DocumentProcessingWorker';
 export * from './WhatsAppSendingWorker';
+export * from './WhatsAppWebhookIncomingWorker';

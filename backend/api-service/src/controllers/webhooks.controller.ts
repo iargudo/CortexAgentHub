@@ -10,6 +10,14 @@ import {
 import { IncomingMessage, ChannelType, AppError, createLogger, generateSessionId } from '@cortex/shared';
 import { EmbeddingService, RAGService } from '../services';
 import { getQueueManager, QueueName } from '@cortex/queue-service';
+import {
+  WhatsAppWebhookPipeline,
+  TelegramWebhookPipeline,
+  EmailWebhookPipeline,
+  type IWhatsAppPipelineDeps,
+  type ITelegramPipelineDeps,
+  type IEmailPipelineDeps,
+} from '../pipelines';
 
 const logger = createLogger('WebhooksController');
 
@@ -201,6 +209,65 @@ export class WebhooksController {
         return { routingResult, conversationId, conversationMetadata };
       }
 
+      // Use only the context for the namespace of the last outbound message that had context.
+      // This avoids mixing multiple campaign/case contexts when the user replies.
+      let contextToInject: Record<string, any> | null = null;
+      try {
+        const lastOutboundWithContext = await this.db.query(
+          `SELECT metadata->'external'->>'namespace' AS active_namespace
+           FROM messages
+           WHERE conversation_id = $1 AND role = 'assistant'
+             AND metadata->'external' IS NOT NULL
+             AND metadata->'external' ? 'namespace'
+           ORDER BY timestamp DESC
+           LIMIT 1`,
+          [conversationId]
+        );
+        const activeNamespace =
+          lastOutboundWithContext.rows[0]?.active_namespace &&
+          typeof lastOutboundWithContext.rows[0].active_namespace === 'string'
+            ? (lastOutboundWithContext.rows[0].active_namespace as string)
+            : null;
+
+        if (activeNamespace && externalContext[activeNamespace]) {
+          contextToInject = { [activeNamespace]: externalContext[activeNamespace] };
+          logger.info('Using external context for namespace from last outbound with context', {
+            conversationId,
+            activeNamespace,
+            channelType,
+            userId,
+          });
+        } else {
+          // Fallback: use the namespace with the most recent updated_at
+          const namespaces = Object.keys(externalContext);
+          let latestNs: string | null = null;
+          let latestAt = 0;
+          for (const ns of namespaces) {
+            const entry = externalContext[ns];
+            const updatedAt = entry?.updated_at ? new Date(entry.updated_at).getTime() : 0;
+            if (updatedAt > latestAt) {
+              latestAt = updatedAt;
+              latestNs = ns;
+            }
+          }
+          if (latestNs) {
+            contextToInject = { [latestNs]: externalContext[latestNs] };
+            logger.info('Using external context fallback (most recent updated_at namespace)', {
+              conversationId,
+              activeNamespace: latestNs,
+              channelType,
+              userId,
+            });
+          }
+        }
+      } catch (e: any) {
+        logger.debug('Failed to resolve active namespace for external context (non-fatal)', {
+          conversationId,
+          error: e.message,
+        });
+        contextToInject = null;
+      }
+
       // Safe log (do not print seed values)
       try {
         const namespaces = Object.keys(externalContext || {});
@@ -219,18 +286,19 @@ export class WebhooksController {
           userId,
           namespaces,
           sample,
+          injectingSingleNamespace: contextToInject ? Object.keys(contextToInject)[0] ?? null : null,
         });
       } catch {
         // ignore
       }
 
       // Verbose log (PII risk): show the exact external_context JSON (truncated)
-      if (this.envFlag('LOG_EXTERNAL_CONTEXT_JSON')) {
+      if (this.envFlag('LOG_EXTERNAL_CONTEXT_JSON') && contextToInject) {
         logger.warn('External context JSON (VERBOSE)', {
           conversationId,
           channelType,
           userId,
-          external_context: this.truncateText(externalContext, 4000),
+          external_context: this.truncateText(contextToInject, 4000),
         });
       }
 
@@ -269,10 +337,10 @@ export class WebhooksController {
         });
       }
 
-      // Enrich system prompt only if flow routing exists
-      if (routingResult?.flow?.flow_config) {
+      // Enrich system prompt only if flow routing exists (inject single namespace to avoid mixing contexts)
+      if (routingResult?.flow?.flow_config && contextToInject) {
         const currentSystemPrompt = routingResult.flow.flow_config?.systemPrompt || '';
-        const externalContextText = this.formatExternalContextForPrompt(externalContext);
+        const externalContextText = this.formatExternalContextForPrompt(contextToInject);
         if (externalContextText) {
           const enhancedSystemPrompt =
             currentSystemPrompt +
@@ -330,7 +398,8 @@ export class WebhooksController {
 
   /**
    * Load conversation history from DB and restore to MCP context for the given conversation.
-   * Ensures the orchestrator uses only this conversation's history (avoids mixing between flows).
+   * When there is a last outbound message with context (campaign), only loads messages from that
+   * point onward to avoid mixing topics from previous campaigns/cases.
    */
   private async loadAndRestoreHistoryForConversation(
     conversationId: string,
@@ -341,10 +410,33 @@ export class WebhooksController {
     const contextManager = (this.orchestrator as any)?.contextManager;
     if (!contextManager) return;
     try {
-      const messagesResult = await this.db.query(
-        `SELECT role, content FROM messages WHERE conversation_id = $1 ORDER BY timestamp ASC LIMIT 100`,
+      let sinceTimestamp: string | null = null;
+      const lastOutboundWithContext = await this.db.query(
+        `SELECT timestamp FROM messages
+         WHERE conversation_id = $1 AND role = 'assistant'
+           AND metadata->'external' IS NOT NULL
+           AND metadata->'external' ? 'namespace'
+         ORDER BY timestamp DESC
+         LIMIT 1`,
         [conversationId]
       );
+      if (lastOutboundWithContext.rows.length > 0 && lastOutboundWithContext.rows[0].timestamp) {
+        sinceTimestamp = lastOutboundWithContext.rows[0].timestamp as string;
+      }
+
+      const messagesResult = sinceTimestamp
+        ? await this.db.query(
+            `SELECT role, content FROM messages
+             WHERE conversation_id = $1 AND timestamp >= $2
+             ORDER BY timestamp ASC
+             LIMIT 100`,
+            [conversationId, sinceTimestamp]
+          )
+        : await this.db.query(
+            `SELECT role, content FROM messages WHERE conversation_id = $1 ORDER BY timestamp ASC LIMIT 100`,
+            [conversationId]
+          );
+
       if (messagesResult.rows.length === 0) return;
 
       const mcpContext = await contextManager.getOrCreateContext(conversationId, channelType, userId);
@@ -361,6 +453,7 @@ export class WebhooksController {
         messageCount: messagesResult.rows.length,
         channelType,
         userId,
+        sinceLastOutboundWithContext: !!sinceTimestamp,
       });
     } catch (e: any) {
       logger.debug('Failed to load/restore history for conversation (non-fatal)', {
@@ -396,17 +489,90 @@ export class WebhooksController {
     return undefined;
   }
 
+  /** Returns true if message is duplicate and should be skipped. Used by WhatsApp pipeline. */
+  private async executeDedupCheck(messageId: string): Promise<boolean> {
+    if (!this.db || !messageId) return false;
+    try {
+      const existingMessageResult = await this.db.query(
+        `SELECT id FROM messages 
+         WHERE role = 'user'
+         AND (
+           (metadata->'originalMessage'->>'id')::text = $1
+           OR (metadata->'originalMessage'->'metadata'->>'messageId')::text = $1
+           OR (metadata->'originalMessage'->'metadata'->>'id')::text = $1
+         )
+         LIMIT 1`,
+        [messageId]
+      );
+      if (existingMessageResult.rows.length > 0) return true;
+    } catch (_e: any) {
+      logger.warn('Error checking for duplicate message, continuing with processing', {
+        error: _e.message,
+        messageId,
+      });
+    }
+    return false;
+  }
+
+  /** Dependencies for WhatsApp webhook pipeline. */
+  private getWhatsAppPipelineDeps(): IWhatsAppPipelineDeps {
+    return {
+      tryLoadFlowFromConversation: this.tryLoadFlowFromConversation.bind(this),
+      flowRouter: this.flowRouter,
+      enhanceWithRAGContext: this.enhanceWithRAGContext.bind(this),
+      attachExternalContextToProcessing: this.attachExternalContextToProcessing.bind(this),
+      extractExplicitFlowIdFromConversationMetadata: this.extractExplicitFlowIdFromConversationMetadata.bind(this),
+      tryLoadExplicitFlowRouting: this.tryLoadExplicitFlowRouting.bind(this),
+      loadAndRestoreHistoryForConversation: this.loadAndRestoreHistoryForConversation.bind(this),
+      orchestrator: this.orchestrator,
+      saveConversationAndMessages: this.saveConversationAndMessages.bind(this),
+      getChannelConfigById: this.getChannelConfigById.bind(this),
+      getChannelConfigFromRoutingResult: this.getChannelConfigFromRoutingResult.bind(this),
+      sendWhatsAppMessage: this.sendWhatsAppMessage.bind(this),
+      logSystemEvent: this.logSystemEvent.bind(this),
+      identifyWhatsAppChannelFromWebhook: this.identifyWhatsAppChannelFromWebhook.bind(this),
+      executeDedupCheck: this.executeDedupCheck.bind(this),
+      whatsappAdapter: this.whatsappAdapter,
+    };
+  }
+
+  /** Dependencies for Telegram webhook pipeline. */
+  private getTelegramPipelineDeps(): ITelegramPipelineDeps {
+    return {
+      flowRouter: this.flowRouter,
+      enhanceWithRAGContext: this.enhanceWithRAGContext.bind(this),
+      orchestrator: this.orchestrator,
+      saveConversationAndMessages: this.saveConversationAndMessages.bind(this),
+      telegramAdapter: this.telegramAdapter,
+    };
+  }
+
+  /** Dependencies for Email webhook pipeline. */
+  private getEmailPipelineDeps(): IEmailPipelineDeps {
+    return {
+      flowRouter: this.flowRouter,
+      enhanceWithRAGContext: this.enhanceWithRAGContext.bind(this),
+      orchestrator: this.orchestrator,
+      saveConversationAndMessages: this.saveConversationAndMessages.bind(this),
+      emailAdapter: this.emailAdapter,
+    };
+  }
+
   /**
    * Try to load flow routing from conversation's flow_id (Option A: prioritize conversation flow_id)
    * This ensures that when a client responds, we use the flow from the last campaign sent
    * Now supports multiple conversations per number (one per flow_id)
-   * Returns both routing result and conversationId so we use the same conversation for context/history.
+   * Returns routing + conversationId when flow is active; flowInactive when the flow exists but is inactive (no response sent).
    */
   private async tryLoadFlowFromConversation(
     channelType: ChannelType,
     userId: string,
     requestedChannelId?: string
-  ): Promise<{ routingResult: any; conversationId: string } | null> {
+  ): Promise<
+    | { routingResult: any; conversationId: string }
+    | { conversationId: string; flowInactive: true }
+    | null
+  > {
     if (!this.db) return null;
     try {
       const convResult = await this.db.query(
@@ -431,9 +597,34 @@ export class WebhooksController {
         userId,
       });
 
-      const routingResult = await this.tryLoadExplicitFlowRouting(conversationFlowId, channelType, requestedChannelId);
-      if (!routingResult) return null;
-      return { routingResult, conversationId };
+      // Prefer active flow: if inactive only, we do not continue the conversation (no response)
+      const routingResultActive = await this.tryLoadExplicitFlowRouting(
+        conversationFlowId,
+        channelType,
+        requestedChannelId,
+        false
+      );
+      if (routingResultActive) {
+        return { routingResult: routingResultActive, conversationId };
+      }
+
+      const routingResultInactive = await this.tryLoadExplicitFlowRouting(
+        conversationFlowId,
+        channelType,
+        requestedChannelId,
+        true
+      );
+      if (routingResultInactive) {
+        logger.info('Flow from conversation is inactive; not responding', {
+          conversationId,
+          flowId: conversationFlowId,
+          channelType,
+          userId,
+        });
+        return { conversationId, flowInactive: true as const };
+      }
+
+      return null;
     } catch (e: any) {
       logger.debug('Failed to load flow from conversation (non-fatal)', {
         error: e.message,
@@ -444,10 +635,17 @@ export class WebhooksController {
     }
   }
 
+  /**
+   * Load flow routing by flow ID.
+   * @param allowInactive - When true (e.g. resuming existing conversation), allows flows marked as inactive.
+   *   Use this when the conversation was established by a campaign/outbound from that flow and we must
+   *   continue with the same agent even if the flow was later deactivated.
+   */
   private async tryLoadExplicitFlowRouting(
     flowId: string,
     channelType: ChannelType,
-    requestedChannelId?: string
+    requestedChannelId?: string,
+    allowInactive = false
   ): Promise<any | null> {
     if (!this.db) return null;
     try {
@@ -471,9 +669,9 @@ export class WebhooksController {
         JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
         JOIN channel_configs c ON fc.channel_id = c.id
         WHERE f.id = $1 
-          AND f.active = true
           AND c.channel_type = $2
           AND c.is_active = true
+          ${allowInactive ? '' : 'AND f.active = true'}
         ORDER BY channel_match_priority ASC, fc.priority ASC
         LIMIT 1
         `,
@@ -1521,676 +1719,85 @@ export class WebhooksController {
   }
 
   /**
+   * Process WhatsApp webhook payload (used by queue worker or fallback).
+   * Delegates to WhatsAppWebhookPipeline.
+   */
+  async processWhatsAppWebhookPayload(webhookBody: any): Promise<void> {
+    await WhatsAppWebhookPipeline.run(this.getWhatsAppPipelineDeps(), webhookBody);
+  }
+
+  /**
    * WhatsApp Webhook Handler
    * POST /webhooks/whatsapp
+   * Responds 200 immediately and enqueues payload for processing (all providers: 360Dialog, UltrMsg, Twilio).
+   * Only exception: 360Dialog status-only events (read/delivered) are acknowledged without enqueueing.
    */
   async whatsapp(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     try {
       const webhookBody = request.body as any;
-      
-      // Extract the actual payload - 360Dialog sends the payload wrapped in 'body', UltraMsg sends it directly
-      const actualPayload = webhookBody.body || webhookBody;
-    
-      // Detect provider type first
+      const actualPayload = webhookBody?.body || webhookBody;
       const is360Dialog = actualPayload?.object === 'whatsapp_business_account' || webhookBody?.body?.object === 'whatsapp_business_account';
-    const isUltraMsg = !!actualPayload?.instanceId || !!actualPayload?.event_type;
-    const isTwilio = !!actualPayload?.MessageSid;
-    
-    // Extract instanceId and messageText based on provider format
-    let instanceId = 'unknown';
-    let messageText = '';
-    
-    if (is360Dialog) {
-      // 360Dialog format: extract from entry[0].changes[0].value
-      const entry = actualPayload?.entry?.[0];
-      const changes = entry?.changes?.[0];
-      const value = changes?.value;
-      
-      // Detectar status updates ANTES de hacer logging completo
-      // Si solo hay statuses y no hay messages, es una actualización de estado (read, delivered, etc.)
-      if (value?.statuses && !value?.messages) {
-        // Es solo una actualización de estado, no un mensaje
-        // Log mínimo en DEBUG y retornar sin procesar ni guardar en system_logs
-        logger.debug('360Dialog status update received (ignoring)', {
-          provider: '360dialog',
-          statusCount: value.statuses.length,
-          statuses: value.statuses.map((s: any) => s.status),
-          phoneNumberId: value?.metadata?.phone_number_id,
-        });
-        reply.send({ success: true });
-        return;
-      }
-      
-      const firstMessage = value?.messages?.[0];
-      instanceId = value?.metadata?.phone_number_id || entry?.id || 'unknown';
-      messageText = firstMessage?.text?.body || firstMessage?.image?.caption || firstMessage?.video?.caption || firstMessage?.document?.caption || '';
-    } else if (isUltraMsg) {
-      // UltraMsg format: extract from data object
-      instanceId = actualPayload?.instanceId || actualPayload?.data?.from || 'unknown';
-      messageText = actualPayload?.data?.body || '';
-    } else if (isTwilio) {
-      // Twilio format: extract from root level
-      instanceId = actualPayload?.AccountSid || 'unknown';
-      messageText = actualPayload?.Body || '';
-    }
-    
-    // Determine provider name
-    let provider = 'unknown';
-    if (is360Dialog) {
-      provider = '360dialog';
-    } else if (isUltraMsg) {
-      provider = 'ultramsg';
-    } else if (isTwilio) {
-      provider = 'twilio';
-    }
-    
-    // Log complete payload for all providers
-    logger.info(`WhatsApp webhook received (${provider}) - Full payload`, {
-      provider,
-      fullPayload: JSON.stringify(webhookBody, null, 2),
-      extractedPayload: JSON.stringify(actualPayload, null, 2),
-      instanceId,
-      hasMessage: is360Dialog ? !!actualPayload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0] : !!actualPayload?.data?.body,
-      messageLength: messageText?.length || 0,
-      // 360Dialog specific fields
-      ...(is360Dialog && {
-        hasMessages: !!actualPayload?.entry?.[0]?.changes?.[0]?.value?.messages,
-        messagesCount: actualPayload?.entry?.[0]?.changes?.[0]?.value?.messages?.length || 0,
-        phoneNumberId: actualPayload?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id,
-        wabaId: actualPayload?.entry?.[0]?.id,
-      }),
-      // UltraMsg specific fields
-      ...(isUltraMsg && {
-        eventType: actualPayload?.event_type,
-        instanceId: actualPayload?.instanceId,
-      }),
-      // Twilio specific fields
-      ...(isTwilio && {
-        accountSid: actualPayload?.AccountSid,
-        messageSid: actualPayload?.MessageSid,
-      }),
-    });
 
-    // Log to database with full payload for all providers
-    await this.logSystemEvent('info', `WhatsApp webhook received (${provider}) - Full payload`, {
-        service: 'webhooks',
-        metadata: {
-          channel: 'whatsapp',
-          provider,
-          fullPayload: webhookBody,
-          extractedPayload: actualPayload,
-          instanceId,
-          hasMessage: is360Dialog ? !!actualPayload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0] : !!actualPayload?.data?.body,
-          messageLength: messageText?.length || 0,
-          // 360Dialog specific fields
-          ...(is360Dialog && {
-            phoneNumberId: actualPayload?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id,
-            wabaId: actualPayload?.entry?.[0]?.id,
-            hasMessages: !!actualPayload?.entry?.[0]?.changes?.[0]?.value?.messages,
-            messagesCount: actualPayload?.entry?.[0]?.changes?.[0]?.value?.messages?.length || 0,
-          }),
-          // UltraMsg specific fields
-          ...(isUltraMsg && {
-            eventType: actualPayload?.event_type,
-            instanceId: actualPayload?.instanceId,
-          }),
-          // Twilio specific fields
-          ...(isTwilio && {
-            accountSid: actualPayload?.AccountSid,
-            messageSid: actualPayload?.MessageSid,
-          }),
-        },
-        userId: is360Dialog 
-          ? actualPayload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from 
-          : (actualPayload?.data?.from || actualPayload?.From),
-      });
-
-      // Identify the specific channel (channel_configs.id) from webhook payload
-      // Use the actual payload (might be wrapped in 'body')
-      const identifiedChannelId = await this.identifyWhatsAppChannelFromWebhook(actualPayload);
-      
-      if (identifiedChannelId) {
-        logger.info('WhatsApp channel identified from webhook', {
-          channelId: identifiedChannelId,
-          instanceId,
-        });
-      } else {
-        logger.warn('Could not identify specific WhatsApp channel from webhook, will use routing by type', {
-          instanceId,
-        });
+      // 360Dialog: skip queue for status-only (read/delivered); no message to process
+      if (is360Dialog) {
+        const entry = actualPayload?.entry?.[0];
+        const value = entry?.changes?.[0]?.value;
+        if (value?.statuses && !value?.messages) {
+          logger.debug('360Dialog status update received (ignoring)', {
+            provider: '360dialog',
+            statusCount: value.statuses.length,
+            phoneNumberId: value?.metadata?.phone_number_id,
+          });
+          reply.send({ success: true });
+          return;
+        }
       }
 
-      // Handle webhook using adapter (handles different event types)
-      // IMPORTANT: Pass the original webhookBody to handleWebhook, not actualPayload
-      // handleWebhook will handle the extraction internally to support both formats
-      logger.debug('Passing payload to handleWebhook', {
-        webhookBodyKeys: webhookBody ? Object.keys(webhookBody) : [],
-        actualPayloadKeys: actualPayload ? Object.keys(actualPayload) : [],
-        hasBodyInWebhookBody: !!webhookBody?.body,
-        hasObjectInActualPayload: !!actualPayload?.object,
-        objectValue: actualPayload?.object,
-      });
-      // Pass webhookBody (which may have 'body' wrapper) to handleWebhook
-      // handleWebhook will extract the actual payload internally
-      const normalizedMessage = await this.whatsappAdapter.handleWebhook(webhookBody);
+      // All providers (360Dialog message, UltrMsg, Twilio): respond 200 and enqueue
+      reply.send({ success: true, queued: true });
 
-      // If no message to process (e.g., status update), return success
-      // Note: Status updates are already handled earlier, so this handles other edge cases
-      if (!normalizedMessage) {
-        // Solo log en DEBUG, no guardar en system_logs para evitar ruido
-        logger.debug('Webhook event processed, no message to handle', {
-          channel: 'whatsapp',
-          instanceId,
-          channelId: identifiedChannelId,
-        });
-        // NO llamar a logSystemEvent para evitar guardar en system_logs
-        reply.send({ success: true });
-        return;
-      }
-
-      // ✅ DEDUPLICACIÓN: Check if this message was already processed
-      // WhatsApp providers send unique messageId for each message
-      // We should check if a message with this messageId already exists in the database
-      const messageId = normalizedMessage.metadata?.messageId || normalizedMessage.metadata?.id;
-      if (messageId && this.db) {
+      if (this.queueManager) {
         try {
-          const existingMessageResult = await this.db.query(
-            `SELECT id FROM messages 
-             WHERE role = 'user'
-             AND (
-               (metadata->'originalMessage'->>'id')::text = $1
-               OR (metadata->'originalMessage'->'metadata'->>'messageId')::text = $1
-               OR (metadata->'originalMessage'->'metadata'->>'id')::text = $1
-             )
-             LIMIT 1`,
-            [messageId]
+          await this.queueManager.addJob(
+            QueueName.WHATSAPP_WEBHOOK_INCOMING,
+            'process-whatsapp-webhook',
+            { webhookBody, receivedAt: new Date().toISOString() },
+            { removeOnComplete: 100 }
           );
-
-          if (existingMessageResult.rows.length > 0) {
-            logger.info('Duplicate WhatsApp message detected, skipping processing', {
-              messageId: messageId,
-              userId: normalizedMessage.channelUserId,
-              existingMessageId: existingMessageResult.rows[0].id,
-              channelId: identifiedChannelId,
+        } catch (enqueueError: any) {
+          logger.error('Failed to enqueue WhatsApp webhook, processing inline', { error: enqueueError.message });
+          setImmediate(() => {
+            this.processWhatsAppWebhookPayload(webhookBody).catch((err: any) => {
+              logger.error('Error processing WhatsApp webhook (inline fallback)', { error: err.message });
+              this.logSystemEvent('error', `WhatsApp webhook inline processing failed: ${err.message}`, {
+                service: 'webhooks',
+                metadata: { channel: 'whatsapp', errorMessage: err.message },
+              }).catch(() => {});
             });
-            // Return success to acknowledge the webhook, but don't process the message
-            reply.send({ success: true, duplicate: true });
-            return;
-          }
-        } catch (dedupError: any) {
-          // Log error but continue processing - don't fail the webhook due to deduplication check
-          logger.warn('Error checking for duplicate message, continuing with processing', {
-            error: dedupError.message,
-            messageId: messageId,
           });
         }
+      } else {
+        setImmediate(() => {
+          this.processWhatsAppWebhookPayload(webhookBody).catch((err: any) => {
+            logger.error('Error processing WhatsApp webhook (no queue)', { error: err.message });
+            this.logSystemEvent('error', `WhatsApp webhook processing failed: ${err.message}`, {
+              service: 'webhooks',
+              metadata: { channel: 'whatsapp', errorMessage: err.message },
+            }).catch(() => {});
+          });
+        });
       }
-
-      // ✅ CRÍTICO: Responder INMEDIATAMENTE al webhook
-      // Esto evita que WhatsApp reenvíe el mensaje por timeout
-      // El procesamiento se hará de forma asíncrona después de responder
-      reply.send({ success: true, processing: true });
-
-      // ✅ Procesar mensaje de forma ASÍNCRONA (sin bloquear la respuesta)
-      // Usar setImmediate para ejecutar en el siguiente tick del event loop
-      setImmediate(async () => {
-        try {
-          await this.processWhatsAppMessageAsync(normalizedMessage, identifiedChannelId);
-        } catch (asyncError: any) {
-          // Los errores en procesamiento asíncrono no afectan la respuesta del webhook
-          const messageId = normalizedMessage.metadata?.messageId || normalizedMessage.metadata?.id;
-          logger.error('Error processing WhatsApp message asynchronously', {
-            error: asyncError.message,
-            stack: asyncError.stack,
-            userId: normalizedMessage.channelUserId,
-            messageId: messageId,
-          });
-          
-          // Log to system_logs for visibility
-          await this.logSystemEvent('error', `Failed to process WhatsApp message asynchronously: ${asyncError.message}`, {
-            service: 'webhooks',
-            metadata: {
-              channel: 'whatsapp',
-              userId: normalizedMessage.channelUserId,
-              messageId: messageId,
-              errorMessage: asyncError.message,
-              errorStack: asyncError.stack,
-            },
-            stackTrace: asyncError.stack,
-            userId: normalizedMessage.channelUserId,
-          });
-        }
-      });
     } catch (error: any) {
       logger.error('WhatsApp webhook error', { error: error.message });
-      
-      // Log error to database
-      await this.logSystemEvent('error', `WhatsApp webhook failed: ${error.message}`, {
-        service: 'webhooks',
-        metadata: {
-          channel: 'whatsapp',
-          errorCode: (error as any).code,
-          errorName: error.name,
-        },
-        stackTrace: error.stack,
-      });
-      
-      // Only throw error if reply hasn't been sent yet
-      // If reply was already sent, the error occurred in async processing and was already handled
       if (!reply.sent) {
-        throw new AppError(
-          'WEBHOOK_ERROR',
-          `WhatsApp webhook failed: ${error.message}`,
-          500
-        );
-      } else {
-        // Reply already sent, error occurred in async processing
-        // Log it but don't throw (would cause "Cannot send response after headers have been sent")
-        logger.warn('Error occurred after webhook response was sent (async processing)', {
-          error: error.message,
-          stack: error.stack,
-        });
-      }
-    }
-  }
-
-  /**
-   * Process WhatsApp message asynchronously
-   * This method contains all the processing logic that was previously in the whatsapp handler
-   * Called after responding to the webhook to avoid timeouts
-   */
-  private async processWhatsAppMessageAsync(
-    normalizedMessage: IncomingMessage,
-    identifiedChannelId?: string
-  ): Promise<void> {
-    // Add identified channelId to message metadata for explicit routing
-    if (identifiedChannelId) {
-      // Ensure metadata exists (should always exist from normalizeMessage, but be safe)
-      if (!normalizedMessage.metadata) {
-        normalizedMessage.metadata = {};
-      }
-      normalizedMessage.metadata.channelId = identifiedChannelId;
-      normalizedMessage.metadata.channel_config_id = identifiedChannelId;
-      logger.info('Added channelId to normalized message metadata for explicit routing', {
-        channelId: identifiedChannelId,
-        messageId: normalizedMessage.metadata?.messageId || normalizedMessage.metadata?.id,
-        userId: normalizedMessage.channelUserId,
-      });
-    } else {
-      logger.debug('No channelId identified, routing will use channel type matching', {
-        messageId: normalizedMessage.metadata?.messageId || normalizedMessage.metadata?.id,
-        userId: normalizedMessage.channelUserId,
-      });
-    }
-
-    const requestedChannelId =
-      (normalizedMessage.metadata?.channelId as string) ||
-      (normalizedMessage.metadata?.channel_config_id as string) ||
-      identifiedChannelId;
-
-    // Option A: Prioritize flow_id from conversation (same conversation used for context/history)
-    const optionA = await this.tryLoadFlowFromConversation(
-      normalizedMessage.channelType,
-      normalizedMessage.channelUserId,
-      typeof requestedChannelId === 'string' ? requestedChannelId : undefined
-    );
-
-    let routingResult: any = null;
-    let resolvedConversationId: string | undefined;
-
-    if (optionA) {
-      routingResult = optionA.routingResult;
-      resolvedConversationId = optionA.conversationId;
-      if (!normalizedMessage.metadata) normalizedMessage.metadata = {};
-      normalizedMessage.metadata.conversationId = resolvedConversationId;
-      logger.info('Using flow_id from conversation (Option A)', {
-        flowId: routingResult?.flow?.id,
-        flowName: routingResult?.flow?.name,
-        conversationId: resolvedConversationId,
-        channelType: normalizedMessage.channelType,
-        userId: normalizedMessage.channelUserId,
-      });
-    } else {
-      logger.debug('No flow_id in conversation or flow not active, using router', {
-        channelType: normalizedMessage.channelType,
-        userId: normalizedMessage.channelUserId,
-      });
-      routingResult = await this.flowRouter.route(normalizedMessage);
-    }
-
-    if (routingResult) {
-      routingResult = await this.enhanceWithRAGContext(
-        routingResult,
-        normalizedMessage.content
-      );
-    }
-
-    // Attach external context using the same conversation we route to (avoids mixing contexts)
-    const attachedExternal = await this.attachExternalContextToProcessing(
-      normalizedMessage,
-      routingResult,
-      resolvedConversationId ?? undefined
-    );
-    routingResult = attachedExternal.routingResult;
-    const attachedConversationMetadata = attachedExternal.conversationMetadata;
-    const effectiveConversationId = resolvedConversationId ?? attachedExternal.conversationId;
-
-    if (!routingResult) {
-      const explicitFlowId = this.extractExplicitFlowIdFromConversationMetadata(attachedConversationMetadata);
-      if (explicitFlowId) {
-        const explicitRouting = await this.tryLoadExplicitFlowRouting(
-          explicitFlowId,
-          normalizedMessage.channelType,
-          typeof requestedChannelId === 'string' ? requestedChannelId : undefined
-        );
-        if (explicitRouting) {
-          routingResult = await this.enhanceWithRAGContext(explicitRouting, normalizedMessage.content);
-          const reattached = await this.attachExternalContextToProcessing(
-            normalizedMessage,
-            routingResult,
-            effectiveConversationId ?? undefined
-          );
-          routingResult = reattached.routingResult;
-        }
-      }
-    }
-
-    if (!routingResult) {
-      logger.warn('No flow matched for WhatsApp message', {
-        channelType: normalizedMessage.channelType,
-        phoneNumber: (normalizedMessage as any).phoneNumber,
-      });
-      
-      await this.logSystemEvent('warn', 'No flow matched for WhatsApp message', {
-        service: 'webhooks',
-        metadata: {
-          channel: 'whatsapp',
-          channelType: normalizedMessage.channelType,
-          phoneNumber: (normalizedMessage as any).phoneNumber,
-          userId: normalizedMessage.channelUserId,
-        },
-        userId: normalizedMessage.channelUserId,
-      });
-
-      const convIdForHistory = effectiveConversationId ?? attachedExternal?.conversationId;
-      if (convIdForHistory) {
-        await this.loadAndRestoreHistoryForConversation(
-          convIdForHistory,
-          normalizedMessage.channelType,
-          normalizedMessage.channelUserId
-        );
-      }
-
-      // Use default orchestrator without routing
-      const result = await this.orchestrator.processMessage(normalizedMessage);
-
-      // Save conversation and messages to database
-      await this.saveConversationAndMessages(
-        normalizedMessage,
-        result,
-        null
-      );
-
-      // Log orchestrator errors to system_logs for frontend visibility
-      if (result.metadata?.error) {
-        await this.logSystemEvent('error', `Orchestrator error: ${result.metadata.error}`, {
-          service: 'orchestrator',
-          metadata: {
-            errorMessage: result.metadata.error,
-            errorCode: result.metadata.errorCode,
-            conversationId: result.conversationId,
-            channel: 'whatsapp',
-            userId: normalizedMessage.channelUserId,
-            processingTimeMs: result.processingTimeMs,
-          },
-          stackTrace: result.metadata.error,
-          userId: normalizedMessage.channelUserId,
-          conversationId: result.conversationId || undefined,
-        });
-      }
-
-      // Log tool execution errors to system_logs for frontend visibility
-      if (result.toolExecutions && result.toolExecutions.length > 0) {
-        for (const toolExec of result.toolExecutions) {
-          if (toolExec.status === 'failed') {
-            await this.logSystemEvent('error', `Tool execution failed: ${toolExec.toolName}`, {
-              service: 'tools',
-              metadata: {
-                toolName: toolExec.toolName,
-                parameters: toolExec.parameters,
-                error: toolExec.error,
-                executionTimeMs: toolExec.executionTimeMs,
-                channel: 'whatsapp',
-                userId: normalizedMessage.channelUserId,
-              },
-              stackTrace: toolExec.error,
-              userId: normalizedMessage.channelUserId,
-              conversationId: result.conversationId || undefined,
-            });
-          } else if (toolExec.status === 'success') {
-            // Log successful tool executions as info for visibility
-            await this.logSystemEvent('info', `Tool executed successfully: ${toolExec.toolName}`, {
-              service: 'tools',
-              metadata: {
-                toolName: toolExec.toolName,
-                executionTimeMs: toolExec.executionTimeMs,
-                channel: 'whatsapp',
-                userId: normalizedMessage.channelUserId,
-              },
-              userId: normalizedMessage.channelUserId,
-              conversationId: result.conversationId || undefined,
-            });
-          }
-        }
-      }
-
-      // Get channel configuration from database if channelId is available
-      const channelId = normalizedMessage.metadata?.channelId || normalizedMessage.metadata?.channel_config_id;
-      const channelConfig = channelId ? await this.getChannelConfigById(channelId) : undefined;
-      
-      logger.info('Using channel configuration for sending (no flow)', {
-        hasChannelConfig: !!channelConfig,
-        channelId: channelId || '(not specified)',
-        instanceId: channelConfig?.instanceId, // Ultramsg instanceId from config
-        useQueue: this.useQueueForWhatsApp && !!this.queueManager,
-      });
-
-      // Send response using queue (with retries)
-      // CRITICAL: Wrap in try-catch to ensure webhook doesn't fail if queue is unavailable
-      // The message is already processed and saved, so we should respond successfully
-      // If queue fails, the error is logged but webhook responds successfully
-      try {
-        await this.sendWhatsAppMessage(
-          normalizedMessage.channelUserId,
-          {
-            channelUserId: normalizedMessage.channelUserId,
-            content: result.outgoingMessage.content,
-            metadata: {
-              ...result.metadata,
-              conversationId: result.conversationId, // Include conversationId for UltraMsg referenceId
-            },
-          },
-          channelConfig
-        );
-      } catch (sendError: any) {
-        // Log the error but don't fail the webhook
-        // The message processing is complete, webhook should respond successfully
-        logger.error('CRITICAL: Failed to queue WhatsApp message response', {
-          error: sendError.message,
-          errorStack: sendError.stack,
-          userId: normalizedMessage.channelUserId,
-          conversationId: result.conversationId,
-          queueAvailable: this.useQueueForWhatsApp && !!this.queueManager,
-        });
-        
-        // Log to system_logs for visibility
-        await this.logSystemEvent('error', `CRITICAL: Failed to queue WhatsApp message: ${sendError.message}`, {
+        this.logSystemEvent('error', `WhatsApp webhook failed: ${error.message}`, {
           service: 'webhooks',
-          metadata: {
-            channel: 'whatsapp',
-            userId: normalizedMessage.channelUserId,
-            conversationId: result.conversationId,
-            errorMessage: sendError.message,
-            errorStack: sendError.stack,
-            queueAvailable: this.useQueueForWhatsApp && !!this.queueManager,
-          },
-          stackTrace: sendError.stack,
-          userId: normalizedMessage.channelUserId,
-          conversationId: result.conversationId || undefined,
-        });
-        
-        // Continue - webhook will respond successfully even if queue failed
-        // The message was processed and saved, but response couldn't be queued
-        // This is a critical error that needs to be fixed (queue system must be available)
+          metadata: { channel: 'whatsapp', errorCode: (error as any).code, errorName: error.name },
+          stackTrace: error.stack,
+        }).catch(() => {});
+        throw new AppError('WEBHOOK_ERROR', `WhatsApp webhook failed: ${error.message}`, 500);
       }
-    } else {
-      logger.info('Flow matched for WhatsApp message', {
-        flowName: routingResult.flow.name,
-        llmProvider: routingResult.llmProvider,
-        enabledTools: routingResult.enabledTools,
-      });
-      
-      await this.logSystemEvent('info', 'Flow matched for WhatsApp message', {
-        service: 'webhooks',
-        metadata: {
-          channel: 'whatsapp',
-          flowName: routingResult.flow.name,
-          llmProvider: routingResult.llmProvider,
-          enabledTools: routingResult.enabledTools,
-          userId: normalizedMessage.channelUserId,
-        },
-        userId: normalizedMessage.channelUserId,
-      });
-
-      const convIdForHistory = effectiveConversationId ?? attachedExternal?.conversationId;
-      if (convIdForHistory) {
-        await this.loadAndRestoreHistoryForConversation(
-          convIdForHistory,
-          normalizedMessage.channelType,
-          normalizedMessage.channelUserId
-        );
-      }
-
-      // Process through orchestrator with routing result
-      const result = await this.orchestrator.processMessage(normalizedMessage, routingResult);
-
-      // Save conversation and messages to database
-      await this.saveConversationAndMessages(
-        normalizedMessage,
-        result,
-        routingResult
-      );
-
-      // Log orchestrator errors to system_logs for frontend visibility
-      if (result.metadata?.error) {
-        await this.logSystemEvent('error', `Orchestrator error: ${result.metadata.error}`, {
-          service: 'orchestrator',
-          metadata: {
-            errorMessage: result.metadata.error,
-            errorCode: result.metadata.errorCode,
-            conversationId: result.conversationId,
-            channel: 'whatsapp',
-            userId: normalizedMessage.channelUserId,
-            processingTimeMs: result.processingTimeMs,
-          },
-          stackTrace: result.metadata.error,
-          userId: normalizedMessage.channelUserId,
-          conversationId: result.conversationId || undefined,
-        });
-      }
-
-      // Log tool execution errors to system_logs for frontend visibility
-      if (result.toolExecutions && result.toolExecutions.length > 0) {
-        for (const toolExec of result.toolExecutions) {
-          if (toolExec.status === 'failed') {
-            await this.logSystemEvent('error', `Tool execution failed: ${toolExec.toolName}`, {
-              service: 'tools',
-              metadata: {
-                toolName: toolExec.toolName,
-                parameters: toolExec.parameters,
-                error: toolExec.error,
-                executionTimeMs: toolExec.executionTimeMs,
-                channel: 'whatsapp',
-                userId: normalizedMessage.channelUserId,
-              },
-              stackTrace: toolExec.error,
-              userId: normalizedMessage.channelUserId,
-              conversationId: result.conversationId || undefined,
-            });
-          } else if (toolExec.status === 'success') {
-            // Log successful tool executions as info for visibility
-            await this.logSystemEvent('info', `Tool executed successfully: ${toolExec.toolName}`, {
-              service: 'tools',
-              metadata: {
-                toolName: toolExec.toolName,
-                executionTimeMs: toolExec.executionTimeMs,
-                channel: 'whatsapp',
-                userId: normalizedMessage.channelUserId,
-              },
-              userId: normalizedMessage.channelUserId,
-              conversationId: result.conversationId || undefined,
-            });
-          }
-        }
-      }
-
-      // Get channel configuration from routing result or database
-      const channelConfig = await this.getChannelConfigFromRoutingResult(routingResult);
-      
-      logger.info('Using channel configuration for sending', {
-        hasChannelConfig: !!channelConfig,
-        instanceId: channelConfig?.instanceId || 'using default',
-        useQueue: this.useQueueForWhatsApp && !!this.queueManager,
-      });
-
-      // Send response using queue (with retries)
-      // CRITICAL: Wrap in try-catch to ensure webhook doesn't fail if queue is unavailable
-      // The message is already processed and saved, so we should respond successfully
-      // If queue fails, the error is logged but webhook responds successfully
-      try {
-        await this.sendWhatsAppMessage(
-          normalizedMessage.channelUserId,
-          {
-            channelUserId: normalizedMessage.channelUserId,
-            content: result.outgoingMessage.content,
-            metadata: {
-              ...result.metadata,
-              conversationId: result.conversationId, // Include conversationId for UltraMsg referenceId
-            },
-          },
-          channelConfig
-        );
-      } catch (sendError: any) {
-        // Log the error but don't fail the webhook
-        // The message processing is complete, webhook should respond successfully
-        logger.error('CRITICAL: Failed to queue WhatsApp message response', {
-          error: sendError.message,
-          errorStack: sendError.stack,
-          userId: normalizedMessage.channelUserId,
-          conversationId: result.conversationId,
-          queueAvailable: this.useQueueForWhatsApp && !!this.queueManager,
-        });
-        
-        // Log to system_logs for visibility
-        await this.logSystemEvent('error', `CRITICAL: Failed to queue WhatsApp message: ${sendError.message}`, {
-          service: 'webhooks',
-          metadata: {
-            channel: 'whatsapp',
-            userId: normalizedMessage.channelUserId,
-            conversationId: result.conversationId,
-            errorMessage: sendError.message,
-            errorStack: sendError.stack,
-            queueAvailable: this.useQueueForWhatsApp && !!this.queueManager,
-          },
-          stackTrace: sendError.stack,
-          userId: normalizedMessage.channelUserId,
-          conversationId: result.conversationId || undefined,
-        });
-        
-        // Continue - webhook will respond successfully even if queue failed
-        // The message was processed and saved, but response couldn't be queued
-        // This is a critical error that needs to be fixed (queue system must be available)
-      }
+      logger.warn('Error after webhook response was sent', { error: error.message, stack: error.stack });
     }
   }
 
@@ -2200,68 +1807,7 @@ export class WebhooksController {
    */
   async telegram(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     try {
-      logger.info('Telegram webhook received', { body: request.body });
-
-      // Normalize message using adapter
-      const normalizedMessage = this.telegramAdapter.receiveMessage(request.body as any);
-
-      // Route message to determine flow and LLM
-      let routingResult = await this.flowRouter.route(normalizedMessage);
-
-      // Enhance with RAG context if flow is available
-      if (routingResult) {
-        routingResult = await this.enhanceWithRAGContext(
-          routingResult,
-          normalizedMessage.content
-        );
-      }
-
-      if (!routingResult) {
-        logger.warn('No flow matched for Telegram message', {
-          channelType: normalizedMessage.channelType,
-          userId: normalizedMessage.channelUserId,
-        });
-
-        // Use default orchestrator without routing
-        const result = await this.orchestrator.processMessage(normalizedMessage);
-
-        // Save conversation and messages to database
-        await this.saveConversationAndMessages(
-          normalizedMessage,
-          result,
-          null
-        );
-
-        await this.telegramAdapter.sendMessage(normalizedMessage.channelUserId, {
-          channelUserId: normalizedMessage.channelUserId,
-          content: result.outgoingMessage.content,
-          metadata: result.metadata,
-        });
-      } else {
-        logger.info('Flow matched for Telegram message', {
-          flowName: routingResult.flow.name,
-          llmProvider: routingResult.llmProvider,
-          enabledTools: routingResult.enabledTools,
-        });
-
-        // Process through orchestrator with routing result
-        const result = await this.orchestrator.processMessage(normalizedMessage, routingResult);
-
-        // Save conversation and messages to database
-        await this.saveConversationAndMessages(
-          normalizedMessage,
-          result,
-          routingResult
-        );
-
-        // Send response back through Telegram adapter
-        await this.telegramAdapter.sendMessage(normalizedMessage.channelUserId, {
-          channelUserId: normalizedMessage.channelUserId,
-          content: result.outgoingMessage.content,
-          metadata: result.metadata,
-        });
-      }
-
+      await TelegramWebhookPipeline.run(this.getTelegramPipelineDeps(), request.body as any);
       reply.send({ success: true });
     } catch (error: any) {
       logger.error('Telegram webhook error', { error: error.message });
@@ -2279,68 +1825,7 @@ export class WebhooksController {
    */
   async email(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     try {
-      logger.info('Email webhook received', { body: request.body });
-
-      // Normalize message using adapter
-      const normalizedMessage = this.emailAdapter.receiveMessage(request.body);
-
-      // Route message to determine flow and LLM
-      let routingResult = await this.flowRouter.route(normalizedMessage);
-
-      // Enhance with RAG context if flow is available
-      if (routingResult) {
-        routingResult = await this.enhanceWithRAGContext(
-          routingResult,
-          normalizedMessage.content
-        );
-      }
-
-      if (!routingResult) {
-        logger.warn('No flow matched for Email message', {
-          channelType: normalizedMessage.channelType,
-          userId: normalizedMessage.channelUserId,
-        });
-
-        // Use default orchestrator without routing
-        const result = await this.orchestrator.processMessage(normalizedMessage);
-
-        // Save conversation and messages to database
-        await this.saveConversationAndMessages(
-          normalizedMessage,
-          result,
-          null
-        );
-
-        await this.emailAdapter.sendMessage(normalizedMessage.channelUserId, {
-          channelUserId: normalizedMessage.channelUserId,
-          content: result.outgoingMessage.content,
-          metadata: result.metadata,
-        });
-      } else {
-        logger.info('Flow matched for Email message', {
-          flowName: routingResult.flow.name,
-          llmProvider: routingResult.llmProvider,
-          enabledTools: routingResult.enabledTools,
-        });
-
-        // Process through orchestrator with routing result
-        const result = await this.orchestrator.processMessage(normalizedMessage, routingResult);
-
-        // Save conversation and messages to database
-        await this.saveConversationAndMessages(
-          normalizedMessage,
-          result,
-          routingResult
-        );
-
-        // Send response back through Email adapter
-        await this.emailAdapter.sendMessage(normalizedMessage.channelUserId, {
-          channelUserId: normalizedMessage.channelUserId,
-          content: result.outgoingMessage.content,
-          metadata: result.metadata,
-        });
-      }
-
+      await EmailWebhookPipeline.run(this.getEmailPipelineDeps(), request.body);
       reply.send({ success: true });
     } catch (error: any) {
       logger.error('Email webhook error', { error: error.message });

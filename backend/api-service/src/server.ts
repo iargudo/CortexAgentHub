@@ -28,7 +28,7 @@ import {
   KnowledgeBasesController,
 } from './controllers';
 import { IntegrationsController } from './controllers/integrations.controller';
-import { WorkerManager, DocumentProcessingWorker, getQueueManager } from '@cortex/queue-service';
+import { WorkerManager, DocumentProcessingWorker, WhatsAppWebhookIncomingWorker, getQueueManager } from '@cortex/queue-service';
 
 /**
  * API Server
@@ -47,6 +47,8 @@ export class APIServer {
   private webchatAdapter: WebChatAdapter;
   private workerManager: WorkerManager | null = null;
   private documentProcessingWorker: DocumentProcessingWorker | null = null;
+  private whatsAppWebhookIncomingWorker: WhatsAppWebhookIncomingWorker | null = null;
+  private isStopped = false;
 
   constructor() {
     this.app = Fastify({
@@ -1184,9 +1186,24 @@ export class APIServer {
     let enableDocumentQueue = false;
     try {
       const queueManager = getQueueManager();
-      
+
+      // WhatsApp webhook incoming worker: create first so webhooks are always processed
+      // (does not depend on document/KB setup; if we only have Redis, this must run)
+      try {
+        this.whatsAppWebhookIncomingWorker = new WhatsAppWebhookIncomingWorker(10);
+        this.whatsAppWebhookIncomingWorker.setProcessorFn(
+          webhooksController.processWhatsAppWebhookPayload.bind(webhooksController)
+        );
+        logger.info('WhatsApp webhook incoming worker created and ready', {
+          queueName: 'whatsapp-webhook-incoming',
+          concurrency: 10,
+        });
+      } catch (waErr: any) {
+        logger.error('Failed to create WhatsApp webhook incoming worker', { error: waErr.message });
+        this.whatsAppWebhookIncomingWorker = null;
+      }
+
       // Initialize WorkerManager to start all workers (including WhatsAppSendingWorker)
-      // CRITICAL: Wrap in try-catch to ensure server starts even if workers fail
       try {
         this.workerManager = new WorkerManager();
         await this.workerManager.startAll();
@@ -1195,36 +1212,32 @@ export class APIServer {
         logger.error('Failed to start queue workers, continuing without workers', {
           error: workerError.message,
         });
-        // Don't throw - allow server to continue without workers
-        // The system will fall back to synchronous sending
         this.workerManager = null;
       }
-      
-      this.documentProcessingWorker = new DocumentProcessingWorker(3); // Process 3 documents concurrently
-      
-      // Get the KnowledgeBaseService instance to connect the worker
-      // We'll need to create it temporarily to get the processDocument method
-      const { EmbeddingService, KnowledgeBaseService } = await import('./services');
-      const embeddingService = new EmbeddingService(this.db);
-      const kbService = new KnowledgeBaseService(this.db, embeddingService, false); // Don't enable queue yet
-      
-      // Connect worker to the processDocument method
-      this.documentProcessingWorker.setProcessDocumentFn(
-        (documentId: string, knowledgeBaseId: string) => 
-          kbService.processDocument(documentId, knowledgeBaseId)
-      );
-      
-      // The worker is automatically started when created (BullMQ Worker starts immediately)
-      // But we need to ensure it's properly initialized
-      logger.info('Document processing worker created and ready', {
-        queueName: 'document-processing',
-        concurrency: 3,
-      });
-      
-      enableDocumentQueue = true;
-      logger.info('Document processing queue initialized');
+
+      // Document processing worker (optional; failure must not block WhatsApp webhook)
+      try {
+        this.documentProcessingWorker = new DocumentProcessingWorker(3);
+        const { EmbeddingService, KnowledgeBaseService } = await import('./services');
+        const embeddingService = new EmbeddingService(this.db);
+        const kbService = new KnowledgeBaseService(this.db, embeddingService, false);
+        this.documentProcessingWorker.setProcessDocumentFn(
+          (documentId: string, knowledgeBaseId: string) =>
+            kbService.processDocument(documentId, knowledgeBaseId)
+        );
+        logger.info('Document processing worker created and ready', {
+          queueName: 'document-processing',
+          concurrency: 3,
+        });
+        enableDocumentQueue = true;
+      } catch (docErr: any) {
+        logger.warn('Document processing worker not available', { error: docErr.message });
+        this.documentProcessingWorker = null;
+      }
+
+      logger.info('Queue initialization finished');
     } catch (error: any) {
-      logger.warn('Document processing queue not available, using synchronous processing', {
+      logger.warn('Queue manager not available, using synchronous processing', {
         error: error.message,
       });
       enableDocumentQueue = false;
@@ -1283,6 +1296,10 @@ export class APIServer {
    * Stop the server
    */
   async stop(): Promise<void> {
+    if (this.isStopped) {
+      return;
+    }
+    this.isStopped = true;
     logger.info('Stopping API Server...');
 
     // Stop workers gracefully - wrap in try-catch to ensure cleanup continues even if workers fail
@@ -1302,10 +1319,34 @@ export class APIServer {
         // Continue with shutdown
       }
     }
+    if (this.whatsAppWebhookIncomingWorker) {
+      try {
+        await this.whatsAppWebhookIncomingWorker.close();
+      } catch (error: any) {
+        logger.error('Error closing WhatsApp webhook incoming worker', { error: error.message });
+        // Continue with shutdown
+      }
+    }
 
-    await this.app.close();
-    await this.db.end();
-    await this.redis.quit();
+    try {
+      await this.app.close();
+    } catch (e: any) {
+      logger.warn('Error closing app', { error: e?.message });
+    }
+    try {
+      await this.db.end();
+    } catch (e: any) {
+      if (e?.message?.includes('more than once')) {
+        logger.debug('Pool already ended');
+      } else {
+        logger.warn('Error closing db pool', { error: e?.message });
+      }
+    }
+    try {
+      await this.redis.quit();
+    } catch (e: any) {
+      logger.warn('Error closing redis', { error: e?.message });
+    }
 
     logger.info('API Server stopped');
   }

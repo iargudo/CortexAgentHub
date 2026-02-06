@@ -1036,11 +1036,52 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
     try {
       if (this.config.provider === 'ultramsg') {
         const endpoint = `/messages/${mediaType}`;
-        await this.client.post(endpoint, {
+        const payload = {
           to: userId,
           [mediaType]: mediaUrl,
           caption: caption || '',
-        });
+        };
+        const response = await this.client.post(endpoint, payload);
+
+        // Validate Ultramsg response (same as sendViaUltramsg: 200 can still contain error)
+        if (response.data && response.data.error) {
+          const errorMessage = response.data.error;
+          this.logger.error('UltrMsg API returned error for media send', {
+            error: errorMessage,
+            instanceId: this.config.instanceId,
+            userId,
+            mediaType,
+            fullResponse: response.data,
+          });
+          if (
+            errorMessage.toLowerCase().includes('stopped') ||
+            errorMessage.toLowerCase().includes('non-payment') ||
+            errorMessage.toLowerCase().includes('subscription')
+          ) {
+            throw new ChannelError(
+              ERROR_CODES.CHANNEL_SEND_FAILED,
+              `UltrMsg instance ${this.config.instanceId} is stopped or inactive. Original: ${errorMessage}`
+            );
+          }
+          throw new Error(errorMessage);
+        }
+
+        // Log actual API response for diagnosis when messages don't reach the client
+        if (response.data && (response.data.sent === true || response.data.id)) {
+          this.logger.info('Message sent successfully via UltrMsg', {
+            instanceId: this.config.instanceId,
+            userId,
+            mediaType,
+            messageId: response.data.id,
+          });
+        } else {
+          this.logger.warn('UltrMsg media response unclear (delivery may have failed)', {
+            instanceId: this.config.instanceId,
+            userId,
+            mediaType,
+            responseData: response.data,
+          });
+        }
       } else if (this.config.provider === 'twilio') {
         const formData = new URLSearchParams({
           From: `whatsapp:${this.config.phoneNumber}`,

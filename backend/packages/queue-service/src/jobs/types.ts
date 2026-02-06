@@ -5,6 +5,7 @@
 export enum QueueName {
   MESSAGE_PROCESSING = 'message-processing',
   WEBHOOK_PROCESSING = 'webhook-processing',
+  WHATSAPP_WEBHOOK_INCOMING = 'whatsapp-webhook-incoming',
   EMAIL_SENDING = 'email-sending',
   ANALYTICS = 'analytics',
   NOTIFICATIONS = 'notifications',
@@ -32,6 +33,15 @@ export interface WebhookProcessingJob {
   channel: string;
   payload: any;
   headers: Record<string, string>;
+  receivedAt: string;
+}
+
+/**
+ * WhatsApp Webhook Incoming Job
+ * Raw webhook body to process asynchronously (enqueue fast, respond 200 fast)
+ */
+export interface WhatsAppWebhookIncomingJob {
+  webhookBody: any;
   receivedAt: string;
 }
 

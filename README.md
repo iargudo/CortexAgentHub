@@ -1,6 +1,6 @@
 # 🧠 CortexAgentHub - Multi-Channel AI Orchestration Platform
 
-**CortexAgentHub** es una plataforma de orquestación de IA de nivel empresarial que conecta múltiples canales de comunicación (WhatsApp, Telegram, WebChat, Email) con múltiples proveedores de LLM (OpenAI, Anthropic, Ollama, Google, HuggingFace) a través de una arquitectura centralizada de agentes inteligentes.
+**CortexAgentHub** es una plataforma de orquestación de IA de nivel empresarial que conecta múltiples canales de comunicación (WhatsApp, Telegram, WebChat, Email) con múltiples proveedores de LLM (OpenAI, Anthropic, Ollama, Google, HuggingFace) a través de una arquitectura centralizada de agentes inteligentes. Incluye capacidades avanzadas de IA como RAG (Retrieval-Augmented Generation), tools dinámicas con function calling, gestión de contexto y memoria de conversación, routing inteligente de agentes, load balancing entre proveedores, y tracking de tokens y costos. Construido con Cursor y Antigravity para desarrollo acelerado con IA.
 
 > 🚀 **Estado**: Sistema 100% funcional en producción con sistema de tools dinámicas, agentes especializados, multi-instancia WhatsApp y UI administrativa completa.
 
