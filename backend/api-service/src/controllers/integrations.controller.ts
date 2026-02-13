@@ -208,6 +208,9 @@ export class IntegrationsController {
     const { channelType, userId, message, mediaUrl, mediaType, envelope, conversationMetadata } =
       request.body || ({} as any);
 
+    // Extract creditId from envelope.refs for correlation (Collect sends creditId here)
+    const creditId = envelope?.refs?.creditId || envelope?.refs?.credito || null;
+
     if (!channelType || !userId || !envelope?.namespace || !envelope?.caseId) {
       throw new AppError(
         'VALIDATION_ERROR',
@@ -247,97 +250,115 @@ export class IntegrationsController {
     const idempotencyKeyHeader = (request.headers['idempotency-key'] || '') as string;
     const idempotencyKey = String(idempotencyKeyHeader || '').trim() || undefined;
 
-    const { conversationId, mergedMetadata } = await this.upsertConversationMetadata({
-      channelType,
-      userId: normalizedUserId,
-      envelope,
-      extraMetadata: conversationMetadata || {},
-    });
+    try {
+      const { conversationId, mergedMetadata } = await this.upsertConversationMetadata({
+        channelType,
+        userId: normalizedUserId,
+        envelope,
+        extraMetadata: conversationMetadata || {},
+      });
 
-    if (idempotencyKey) {
-      const alreadySent = await this.wasOutboundAlreadySent(conversationId, idempotencyKey);
-      if (alreadySent) {
-        reply.send({
-          success: true,
-          data: {
-            conversationId,
-            channelType,
-            userId: normalizedUserId,
-            idempotentReplay: true,
-          },
-        });
-        return;
+      if (idempotencyKey) {
+        const alreadySent = await this.wasOutboundAlreadySent(conversationId, idempotencyKey);
+        if (alreadySent) {
+          reply.send({
+            success: true,
+            data: {
+              conversationId,
+              channelType,
+              userId: normalizedUserId,
+              idempotentReplay: true,
+            },
+          });
+          return;
+        }
       }
-    }
 
-    // Pick channelConfigId: request overrides, then conversation metadata, then any active WhatsApp channel
-    const channelConfigId =
-      (envelope.routing?.channelConfigId && isUuid(envelope.routing.channelConfigId)
-        ? envelope.routing.channelConfigId
-        : undefined) || (await this.getConversationChannelConfigId(conversationId));
+      // Pick channelConfigId: request overrides, then conversation metadata, then any active WhatsApp channel
+      const channelConfigId =
+        (envelope.routing?.channelConfigId && isUuid(envelope.routing.channelConfigId)
+          ? envelope.routing.channelConfigId
+          : undefined) || (await this.getConversationChannelConfigId(conversationId));
 
-    const channelConfig = await this.getWhatsAppChannelConfig(channelConfigId);
+      const channelConfig = await this.getWhatsAppChannelConfig(channelConfigId);
 
-    logger.info('Integration outbound queued (pre-enqueue)', {
-      channelType,
-      userId: normalizedUserId,
-      conversationId,
-      namespace: envelope.namespace,
-      caseId: envelope.caseId,
-      hasIdempotencyKey: !!idempotencyKey,
-      channelConfigSelected: {
-        requestedChannelConfigId: envelope.routing?.channelConfigId || null,
-        conversationChannelConfigId: (await this.getConversationChannelConfigId(conversationId)) || null,
-      },
-      provider: channelConfig?.provider || 'ultramsg',
-      hasMedia: !!mediaUrl,
-      mediaType: mediaType || null,
-    });
-
-    // Verbose log: expose outbound message text only if explicitly enabled
-    if (envFlag('LOG_INTEGRATION_OUTBOUND_MESSAGE_TEXT')) {
-      logger.warn('Integration outbound message (VERBOSE)', {
+      logger.info('Integration outbound queued (pre-enqueue)', {
         channelType,
         userId: normalizedUserId,
         conversationId,
         namespace: envelope.namespace,
         caseId: envelope.caseId,
-        message: truncateText(message || '', 1500),
-        mediaUrl: mediaUrl ? truncateText(mediaUrl, 300) : null,
+        creditId,
+        hasIdempotencyKey: !!idempotencyKey,
+        channelConfigSelected: {
+          requestedChannelConfigId: envelope.routing?.channelConfigId || null,
+          conversationChannelConfigId: (await this.getConversationChannelConfigId(conversationId)) || null,
+        },
+        provider: channelConfig?.provider || 'ultramsg',
+        hasMedia: !!mediaUrl,
         mediaType: mediaType || null,
       });
-    }
 
-    // Enqueue outbound send via the existing WhatsApp sending queue
-    await this.enqueueWhatsAppOutbound(
-      normalizedUserId,
-      conversationId,
-      captionText,
-      channelConfig,
-      hasMedia ? { mediaUrl: String(mediaUrl).trim(), mediaType } : undefined
-    );
+      // Verbose log: expose outbound message text only if explicitly enabled
+      if (envFlag('LOG_INTEGRATION_OUTBOUND_MESSAGE_TEXT')) {
+        logger.warn('Integration outbound message (VERBOSE)', {
+          channelType,
+          userId: normalizedUserId,
+          conversationId,
+          namespace: envelope.namespace,
+          caseId: envelope.caseId,
+          message: truncateText(message || '', 1500),
+          mediaUrl: mediaUrl ? truncateText(mediaUrl, 300) : null,
+          mediaType: mediaType || null,
+        });
+      }
 
-    // Persist outbound message in DB for audit/history + idempotency
-    await this.saveOutboundMessage(conversationId, captionText, {
-      idempotencyKey,
-      source: 'integration',
-      namespace: envelope.namespace,
-      caseId: envelope.caseId,
-      media: hasMedia ? { mediaUrl: String(mediaUrl).trim(), mediaType } : undefined,
-    });
-
-    // Best-effort: update MCP context metadata for immediate availability (no effect if context not created yet)
-    await this.updateMcpContextMetadataBestEffort(channelType, normalizedUserId, conversationId, mergedMetadata);
-
-    reply.send({
-      success: true,
-      data: {
+      // Enqueue outbound send via the existing WhatsApp sending queue
+      await this.enqueueWhatsAppOutbound(
+        normalizedUserId,
         conversationId,
-        channelType,
-        userId: normalizedUserId,
-        queued: true,
-      },
-    });
+        captionText,
+        channelConfig,
+        hasMedia ? { mediaUrl: String(mediaUrl).trim(), mediaType } : undefined
+      );
+
+      // Persist outbound message in DB for audit/history + idempotency
+      await this.saveOutboundMessage(conversationId, captionText, {
+        idempotencyKey,
+        source: 'integration',
+        namespace: envelope.namespace,
+        caseId: envelope.caseId,
+        media: hasMedia ? { mediaUrl: String(mediaUrl).trim(), mediaType } : undefined,
+      });
+
+      // Best-effort: update MCP context metadata for immediate availability (no effect if context not created yet)
+      await this.updateMcpContextMetadataBestEffort(channelType, normalizedUserId, conversationId, mergedMetadata);
+
+      reply.send({
+        success: true,
+        data: {
+          conversationId,
+          channelType,
+          userId: normalizedUserId,
+          queued: true,
+        },
+      });
+    } catch (err: any) {
+      // Log with full context for 500 diagnosis (Collect/cédula/credit correlation)
+      logger.error('Integration outbound/send failed (500)', {
+        userId: String(userId),
+        normalizedUserId,
+        namespace: envelope?.namespace,
+        caseId: envelope?.caseId,
+        creditId,
+        error: err?.message || String(err),
+        errorName: err?.name,
+        errorCode: err?.code,
+        stack: err?.stack,
+        isAppError: err instanceof AppError,
+      });
+      throw err;
+    }
   }
 
   private async upsertConversationMetadata(params: {
@@ -353,84 +374,44 @@ export class IntegrationsController {
     }
 
     // Get the flow_id from the envelope routing
-    const newFlowId = envelope.routing?.flowId && isUuid(envelope.routing.flowId) 
-      ? envelope.routing.flowId 
+    const newFlowId = envelope.routing?.flowId && isUuid(envelope.routing.flowId)
+      ? envelope.routing.flowId
       : null;
 
-    // Check if a conversation exists with the same channel, userId, and flow_id
-    // This allows multiple conversations for the same number with different flows
-    let existingConversation = null;
-    if (newFlowId) {
-      const existingResult = await this.db.query(
-        `SELECT id, metadata, flow_id FROM conversations 
-         WHERE channel = $1 AND channel_user_id = $2 AND flow_id = $3
-         LIMIT 1`,
-        [channelType, userId, newFlowId]
-      );
-      if (existingResult.rows.length > 0) {
-        existingConversation = existingResult.rows[0];
-      }
-    }
+    // Stage uses unique_channel_user_flow (channel, channel_user_id, flow_id). Do NOT update flow_id
+    // on an existing row — that violates the constraint when another row already has that flow.
+    // 1) When flowId provided: find by (channel, userId, flowId) first.
+    // 2) Else or if not found: find by (channel, userId) for backward compatibility.
+    // 3) Never UPDATE flow_id on existing row; insert new row when we need (user, flow).
+    let existingResult = await this.db.query(
+      `SELECT id, metadata, flow_id FROM conversations
+       WHERE channel = $1 AND channel_user_id = $2
+       ${newFlowId ? 'AND flow_id = $3' : ''}
+       ORDER BY last_activity DESC NULLS LAST
+       LIMIT 1`,
+      newFlowId ? [channelType, userId, newFlowId] : [channelType, userId]
+    );
 
     let conversationId: string;
     let existingMetadata: any = {};
 
-    if (existingConversation) {
-      // Use existing conversation with same flow_id
-      conversationId = existingConversation.id as string;
-      existingMetadata = existingConversation.metadata || {};
-      logger.info('Using existing conversation with same flow_id', {
+    if (existingResult.rows.length > 0) {
+      const row = existingResult.rows[0];
+      conversationId = row.id as string;
+      existingMetadata = row.metadata || {};
+      logger.info('Using existing conversation for channel/user', {
         conversationId,
         flowId: newFlowId,
         channelType,
         userId,
       });
     } else {
-      // Check if there's a conversation without flow_id (legacy) or with different flow_id
-      const legacyResult = await this.db.query(
-        `SELECT id, metadata, flow_id FROM conversations 
-         WHERE channel = $1 AND channel_user_id = $2
-         LIMIT 1`,
-        [channelType, userId]
-      );
-
-      if (legacyResult.rows.length > 0) {
-        const legacyConversation = legacyResult.rows[0];
-        const legacyFlowId = legacyConversation.flow_id;
-
-        // If the legacy conversation has no flow_id or a different flow_id, create a new one
-        if (!legacyFlowId || (newFlowId && legacyFlowId !== newFlowId)) {
-          // Create new conversation with the new flow_id
-          const insertResult = await this.db.query(
-            `
-            INSERT INTO conversations (channel, channel_user_id, metadata, status, flow_id)
-            VALUES ($1, $2, $3, 'active', $4)
-            RETURNING id
-            `,
-            [channelType, userId, JSON.stringify({ source: 'integration' }), newFlowId]
-          );
-          conversationId = insertResult.rows[0].id as string;
-          logger.info('Created new conversation for different flow_id', {
-            conversationId,
-            flowId: newFlowId,
-            legacyFlowId,
-            channelType,
-            userId,
-            reason: 'Different flow_id requires separate conversation',
-          });
-        } else {
-          // Use existing conversation (same flow_id)
-          conversationId = legacyConversation.id as string;
-          existingMetadata = legacyConversation.metadata || {};
-        }
-      } else {
-        // No existing conversation, create new one
+      // No matching conversation. Try INSERT. May fail on unique_channel_user (legacy schema).
+      try {
         const insertResult = await this.db.query(
-          `
-          INSERT INTO conversations (channel, channel_user_id, metadata, status, flow_id)
-          VALUES ($1, $2, $3, 'active', $4)
-          RETURNING id
-          `,
+          `INSERT INTO conversations (channel, channel_user_id, metadata, status, flow_id)
+           VALUES ($1, $2, $3, 'active', $4)
+           RETURNING id`,
           [channelType, userId, JSON.stringify({ source: 'integration' }), newFlowId]
         );
         conversationId = insertResult.rows[0].id as string;
@@ -440,6 +421,30 @@ export class IntegrationsController {
           channelType,
           userId,
         });
+      } catch (insertErr: any) {
+        // unique_channel_user or unique_channel_user_flow violation: reuse existing row
+        if (insertErr?.code === '23505') {
+          const fallback = await this.db.query(
+            `SELECT id, metadata, flow_id FROM conversations
+             WHERE channel = $1 AND channel_user_id = $2
+             ORDER BY last_activity DESC NULLS LAST
+             LIMIT 1`,
+            [channelType, userId]
+          );
+          if (fallback.rows.length > 0) {
+            conversationId = fallback.rows[0].id as string;
+            existingMetadata = fallback.rows[0].metadata || {};
+            logger.info('Reusing existing conversation after unique violation', {
+              conversationId,
+              channelType,
+              userId,
+            });
+          } else {
+            throw insertErr;
+          }
+        } else {
+          throw insertErr;
+        }
       }
     }
 
@@ -467,13 +472,8 @@ export class IntegrationsController {
       conversationId,
     ]);
 
-    // Ensure flow_id is set (in case it wasn't set during creation)
-    if (newFlowId) {
-      await this.db.query(`UPDATE conversations SET flow_id = $1 WHERE id = $2`, [
-        newFlowId,
-        conversationId,
-      ]);
-    }
+    // Do NOT update flow_id — causes duplicate key on unique_channel_user_flow when
+    // another conversation already exists for (channel, userId, newFlowId).
 
     // Best-effort: update MCP context metadata too
     await this.updateMcpContextMetadataBestEffort(channelType, userId, conversationId, mergedMetadata);

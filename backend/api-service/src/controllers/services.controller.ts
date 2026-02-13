@@ -258,11 +258,19 @@ export class ServicesController {
       const result = await RESTService.call(config, params);
 
       if (!result.success) {
-        throw new AppError(
-          'REST_CALL_FAILED',
-          result.error || 'Failed to call REST API',
-          500
-        );
+        // Use upstream API error message when available so the UI shows the real cause
+        const upstream = result.data;
+        const upstreamMsg =
+          typeof upstream?.message === 'string'
+            ? upstream.message
+            : typeof upstream?.error === 'string'
+              ? upstream.error
+              : Array.isArray(upstream?.errors) && upstream.errors[0]
+                ? String(upstream.errors[0])
+                : null;
+        const message = upstreamMsg || result.error || 'Failed to call REST API';
+        const metadata = upstream != null ? { upstreamStatus: result.status, upstreamResponse: upstream } : undefined;
+        throw new AppError('REST_CALL_FAILED', message, 500, metadata);
       }
 
       reply.send({

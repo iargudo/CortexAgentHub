@@ -281,8 +281,16 @@ export class DynamicToolLoader {
       });
 
       if (!response.ok) {
-        const error = (await response.json().catch(() => ({ error: 'Unknown error' }))) as { error?: string };
-        throw new Error(error.error || `HTTP ${response.status}`);
+        const body = (await response.json().catch(() => ({ error: { message: 'Unknown error' } }))) as {
+          error?: string | { message?: string };
+        };
+        const errorMessage =
+          typeof body.error === 'object' && body.error?.message
+            ? body.error.message
+            : typeof body.error === 'string'
+              ? body.error
+              : `HTTP ${response.status}`;
+        throw new Error(errorMessage);
       }
 
       const result = (await response.json()) as { data?: { rows?: any[]; rowCount?: number; executionTime?: number } };
@@ -343,8 +351,16 @@ export class DynamicToolLoader {
       });
 
       if (!response.ok) {
-        const error = (await response.json().catch(() => ({ error: 'Unknown error' }))) as { error?: string };
-        throw new Error(error.error || `HTTP ${response.status}`);
+        const body = (await response.json().catch(() => ({ error: { message: 'Unknown error' } }))) as {
+          error?: string | { message?: string };
+        };
+        const errorMessage =
+          typeof body.error === 'object' && body.error?.message
+            ? body.error.message
+            : typeof body.error === 'string'
+              ? body.error
+              : `HTTP ${response.status}`;
+        throw new Error(errorMessage);
       }
 
       const result = (await response.json()) as { data?: { status?: number; statusText?: string; headers?: any; data?: any; executionTime?: number } };

@@ -217,9 +217,15 @@ export class RESTService {
       const executionTime = Date.now() - startTime;
 
       if (!response.ok) {
+        // Include response body in logs to debug 4xx/5xx - the upstream API may return validation details
+        const safeResponseData = typeof responseData === 'object' && responseData !== null
+          ? JSON.stringify(responseData)
+          : String(responseData);
+        const truncated = safeResponseData.length > 500 ? `${safeResponseData.substring(0, 500)}...` : safeResponseData;
         logger.warn('REST API call returned error status', {
           status: response.status,
           url: url.replace(/([?&])(api[_-]?key|password|token|bearer)=[^&]+/gi, '$1$2=***'),
+          responseBody: truncated,
         });
 
         return {
