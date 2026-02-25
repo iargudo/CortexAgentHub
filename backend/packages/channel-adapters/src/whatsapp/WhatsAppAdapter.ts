@@ -5,6 +5,7 @@ import {
   NormalizedMessage,
   OutgoingMessage,
   WhatsAppConfig,
+  WhatsAppTemplatePayload,
   WhatsAppWebhookPayload,
   ChannelError,
   ERROR_CODES,
@@ -323,7 +324,59 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
   }
 
   /**
-   * Send message via 360dialog (WhatsApp Business Cloud API)
+   * Build 360dialog/Meta template message request body.
+   * Supports body_params, header_image_url, or full components (including header with image).
+   * See https://docs.360dialog.com/partner/messaging-and-calling/template-messages/sending-template-messages
+   */
+  private build360dialogTemplatePayload(to: string, template: WhatsAppTemplatePayload): Record<string, unknown> {
+    type ComponentOut = { type: string; parameters?: Array<{ type: 'text'; text: string } | { type: 'image'; image: { link: string } }> };
+    const components: ComponentOut[] = [];
+
+    if (template.header_image_url && template.header_image_url.trim()) {
+      components.push({
+        type: 'header',
+        parameters: [{ type: 'image', image: { link: template.header_image_url.trim() } }],
+      });
+    }
+
+    if (template.body_params && template.body_params.length > 0) {
+      components.push({
+        type: 'body',
+        parameters: template.body_params.map((text) => ({ type: 'text' as const, text })),
+      });
+    } else if (template.components && template.components.length > 0) {
+      const hasHeaderFromUrl = !!template.header_image_url?.trim();
+      for (const c of template.components) {
+        if (hasHeaderFromUrl && c.type === 'header') continue;
+        const params = (c.parameters || []).map((p) => {
+          if (p.type === 'text' && 'text' in p) return { type: 'text' as const, text: p.text };
+          if (p.type === 'image' && 'image' in p && p.image?.link) return { type: 'image' as const, image: { link: p.image.link } };
+          return null;
+        }).filter((p): p is NonNullable<typeof p> => p != null);
+        components.push((params.length > 0 ? { type: c.type, parameters: params } : { type: c.type }) as ComponentOut);
+      }
+    }
+
+    return {
+      recipient_type: 'individual',
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: template.name,
+        language: { code: template.language },
+        ...(components.length > 0 ? { components } : {}),
+      },
+    };
+  }
+
+  /**
+   * Send message via 360dialog (WhatsApp Business Cloud API).
+   * Note: HTTP 200 only means Meta accepted the request; delivery is not guaranteed.
+   * If the message does not arrive: (1) User must have messaged you in the last 24h for free-form
+   * text to be delivered; outside that window only approved template messages are delivered.
+   * (2) Check webhook for status updates (delivered, read, failed) and error codes.
+   *
    * @param userId - User ID to send message to
    * @param message - Message to send
    * @param config - WhatsApp configuration to use (defaults to initialized config)
@@ -377,33 +430,34 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
       .replace(/@c\.us$/, '')
       .replace(/\s+/g, '');
 
-    // Build request payload according to WhatsApp Business Cloud API format
-    const requestPayload: any = {
-      recipient_type: 'individual', // Required: individual or group
-      messaging_product: 'whatsapp', // Required by WhatsApp Business API
-      to: formattedUserId,
-      type: 'text',
-      text: {
-        body: message.content,
-      },
-    };
+    const templatePayload = message.metadata?.template as WhatsAppTemplatePayload | undefined;
+    const isTemplate = !!templatePayload?.name && !!templatePayload?.language;
 
-    // Add context if conversationId is available (for threading)
-    if (message.metadata?.conversationId) {
-      // Note: Context requires message_id from previous message
-      // For now, we'll just send without context
-      // Future enhancement: store message IDs per conversation
-    }
+    // Build request payload: template (approved Meta template) or free text
+    const requestPayload: any = isTemplate
+      ? this.build360dialogTemplatePayload(formattedUserId, templatePayload!)
+      : {
+          recipient_type: 'individual',
+          messaging_product: 'whatsapp',
+          to: formattedUserId,
+          type: 'text',
+          text: { body: message.content || '' },
+        };
 
     const startTime = Date.now();
-    this.logger.debug('Sending WhatsApp message via 360dialog', {
-      userId,
-      formattedUserId,
-      phoneNumberId: config.phoneNumberId,
-      messageLength: message.content?.length || 0,
-      requestUrl: `https://waba-v2.360dialog.io/messages`,
-      timeout: 60000,
-    });
+    this.logger.debug(
+      isTemplate ? 'Sending WhatsApp template via 360dialog' : 'Sending WhatsApp message via 360dialog',
+      {
+        userId,
+        formattedUserId,
+        phoneNumberId: config.phoneNumberId,
+        ...(isTemplate
+          ? { templateName: templatePayload!.name, templateLanguage: templatePayload!.language }
+          : { messageLength: message.content?.length || 0 }),
+        requestUrl: `https://waba-v2.360dialog.io/messages`,
+        timeout: 60000,
+      }
+    );
 
     try {
       // 360dialog API endpoint: POST /messages
@@ -443,7 +497,7 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
         );
       }
 
-      // Log success if response indicates message was sent
+      // Log success if response indicates message was sent (accepted by Meta; delivery is separate)
       if (response.data && response.data.messages && response.data.messages.length > 0) {
         const messageId = response.data.messages[0].id;
         this.logger.info('Message sent successfully via 360dialog', {
@@ -451,6 +505,11 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
           userId: formattedUserId,
           messageId,
         });
+        this.logger.warn(
+          '360dialog: HTTP 200 means "accepted", not "delivered". If message does not arrive on phone: ' +
+            'check (1) 24h window - free text only delivered if user messaged you in last 24h; ' +
+            '(2) use approved template when outside 24h; (3) webhook status updates for delivery/error codes.'
+        );
         return; // Success
       }
 
@@ -462,42 +521,60 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
       });
     } catch (error: any) {
       const duration = Date.now() - startTime;
-      // Log detailed error information
+      let safePayloadPreview: unknown;
+      try {
+        if (requestPayload && typeof requestPayload === 'object' && (requestPayload as any).type === 'template') {
+          const t = (requestPayload as any).template;
+          safePayloadPreview = { type: 'template', template: t ? { name: t.name, language: t.language } : {} };
+        } else if (requestPayload && typeof requestPayload === 'object') {
+          const textObj = (requestPayload as any).text;
+          const bodyStr = textObj && typeof textObj === 'object' && typeof textObj.body === 'string' ? textObj.body : '';
+          safePayloadPreview = bodyStr ? { type: 'text', textBodyPreview: bodyStr.substring(0, 100) + '...' } : { type: 'text', textBodyPreview: '(empty)' };
+        } else {
+          safePayloadPreview = requestPayload;
+        }
+      } catch (_) {
+        safePayloadPreview = { _previewError: 'could not serialize request payload' };
+      }
       const errorDetails: any = {
-        error: error.message,
+        error: error?.message ?? String(error),
         phoneNumberId: config.phoneNumberId,
         userId: formattedUserId,
-        requestUrl: error.config?.url || `https://waba-v2.360dialog.io/messages`,
-        requestPayload: { ...requestPayload, text: { body: requestPayload.text.body.substring(0, 100) + '...' } },
+        requestUrl: error?.config?.url || `https://waba-v2.360dialog.io/messages`,
+        requestPayload: safePayloadPreview,
         duration: `${duration}ms`,
         timeout: 60000,
       };
+      if (error?.stack) {
+        errorDetails.stack = error.stack;
+      }
 
-      // Add HTTP error details if available
-      if (error.response) {
+      if (error?.response) {
         errorDetails.httpStatus = error.response.status;
         errorDetails.httpStatusText = error.response.statusText;
         errorDetails.responseData = error.response.data;
-        
-        // If response contains error object, use that message
         if (error.response.data && error.response.data.error) {
           errorDetails.apiError = error.response.data.error.message || error.response.data.error;
         }
-      } else if (error.request) {
+      } else if (error?.request) {
         errorDetails.networkError = 'No response received from 360dialog API';
-        errorDetails.isTimeout = error.code === 'ECONNABORTED' || error.message.includes('timeout');
+        errorDetails.isTimeout = error.code === 'ECONNABORTED' || (error?.message && String(error.message).includes('timeout'));
       }
 
       this.logger.error('360dialog API request failed', errorDetails);
-      
-      // Provide helpful error message
+
       if (errorDetails.apiError) {
+        const details = error?.response?.data?.error?.error_data?.details;
+        const hint =
+          typeof details === 'string' && /header.*expected IMAGE|expected IMAGE.*received UNKNOWN/i.test(details)
+            ? ' This template has an image header in Meta; send template.header_image_url (public image URL) in the request.'
+            : '';
         throw new ChannelError(
           ERROR_CODES.CHANNEL_SEND_FAILED,
-          `360dialog API error: ${errorDetails.apiError}`
+          `360dialog API error: ${errorDetails.apiError}${hint}`
         );
       }
-      
+
       throw error;
     }
   }

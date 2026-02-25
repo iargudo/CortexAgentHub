@@ -672,7 +672,7 @@ export class WebhooksController {
           AND c.channel_type = $2
           AND c.is_active = true
           ${allowInactive ? '' : 'AND f.active = true'}
-        ORDER BY channel_match_priority ASC, fc.priority ASC
+        ORDER BY channel_match_priority ASC, channel_priority ASC
         LIMIT 1
         `,
         [flowId, channelType, requestedChannelId || '']

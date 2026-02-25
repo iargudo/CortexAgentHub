@@ -32,6 +32,38 @@ export interface WhatsAppConfig {
   wabaId?: string; // 360dialog - WhatsApp Business Account ID (optional)
 }
 
+/** Text parameter for WhatsApp template (body variables {{1}}, {{2}}) */
+export interface WhatsAppTemplateParameterText {
+  type: 'text';
+  text: string;
+}
+
+/** Image parameter for template header (Media Message Template) */
+export interface WhatsAppTemplateParameterImage {
+  type: 'image';
+  image: { link: string };
+}
+
+/** Parameter for WhatsApp Cloud API template components */
+export type WhatsAppTemplateParameter = WhatsAppTemplateParameterText | WhatsAppTemplateParameterImage;
+
+/** Component for WhatsApp template message (body, optional header/buttons) */
+export interface WhatsAppTemplateComponent {
+  type: 'body' | 'header' | 'button';
+  parameters?: WhatsAppTemplateParameter[];
+}
+
+/** Payload to send an approved WhatsApp template (360dialog/Meta). Used when outside 24h window. */
+export interface WhatsAppTemplatePayload {
+  name: string;
+  language: string; // e.g. 'en', 'es'
+  /** Optional: values for body variables {{1}}, {{2}}, ... in order. Simpler than building components[].parameters. */
+  body_params?: string[];
+  /** Optional: URL for template header image. Use when the approved template has a media header (IMAGE). */
+  header_image_url?: string;
+  components?: WhatsAppTemplateComponent[];
+}
+
 export interface TelegramConfig {
   botToken: string;
   webhookUrl: string;

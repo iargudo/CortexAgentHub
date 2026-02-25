@@ -1997,8 +1997,8 @@ export class AdminController {
     try {
       const {
         channel,
-        limit = 50,
-        offset = 0,
+        limit: limitParam,
+        offset: offsetParam,
         startDate,
         endDate,
         status,
@@ -2006,6 +2006,10 @@ export class AdminController {
         hasTools,
         flowId,
       } = request.query;
+
+      // Parse pagination as integers (query params are strings; avoid "50" + "50" = "5050" breaking hasMore)
+      const limit = Math.min(Math.max(parseInt(String(limitParam), 10) || 50, 1), 500);
+      const offset = Math.max(parseInt(String(offsetParam), 10) || 0, 0);
 
       // Build query with filters
       let query = `

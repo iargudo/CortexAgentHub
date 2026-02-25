@@ -777,7 +777,9 @@ export class APIServer {
                     l.config as llm_config,
                     c.channel_type,
                     c.config as channel_config,
-                    c.id as channel_config_id
+                    c.id as channel_config_id,
+                    fc.priority as channel_priority
+                    ${requestedChannelId ? ", CASE WHEN c.id = $3 THEN 1 ELSE 2 END as channel_match_priority" : ''}
                   FROM orchestration_flows f
                   JOIN llm_configs l ON f.llm_id = l.id
                   JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
@@ -787,7 +789,7 @@ export class APIServer {
                     AND c.channel_type = $2
                     AND c.is_active = true
                     ${requestedChannelId ? 'AND c.id = $3' : ''}
-                  ORDER BY ${requestedChannelId ? 'CASE WHEN c.id = $3 THEN 1 ELSE 2 END ASC,' : ''} fc.priority ASC
+                  ORDER BY ${requestedChannelId ? 'channel_match_priority ASC, channel_priority ASC' : 'channel_priority ASC'}
                   LIMIT 1
                   `,
                   requestedChannelId 

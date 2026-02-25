@@ -581,7 +581,7 @@ Headers:
 - `x-api-key: <API_KEY>`
 - `idempotency-key: <string>` (recomendado: estable y único por “intento lógico”)
 
-Body:
+Body (texto o media):
 ```json
 {
   "channelType": "whatsapp",
@@ -592,6 +592,21 @@ Body:
   "envelope": { "namespace": "cortexcollect", "caseId": "case-001" }
 }
 ```
+
+Body (plantilla WhatsApp 360dialog/Meta, p. ej. fuera de ventana 24h). Opción simple con `body_params` (valores para {{1}}, {{2}} en orden):
+```json
+{
+  "channelType": "whatsapp",
+  "userId": "593995906687",
+  "template": {
+    "name": "nombre_plantilla_aprobada",
+    "language": "es",
+    "body_params": ["valor1", "valor2"]
+  },
+  "envelope": { "namespace": "cortexcollect", "caseId": "case-001" }
+}
+```
+También se puede enviar `components` con la estructura completa. Si se envía `template`, no se usa `message` ni `mediaUrl`. Las plantillas deben estar aprobadas en Meta/360dialog.
 
 ### WebSocket (`/webchat/ws`)
 

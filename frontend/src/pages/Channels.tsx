@@ -293,6 +293,18 @@ export function Channels() {
               <p className="text-xs text-gray-600 uppercase tracking-wide">
                 {channel.channel_type || channel.type}
               </p>
+              {(() => {
+                const phone = channel.config?.phoneNumber ?? channel.config?.phone_number ?? channel.config?.from;
+                if (phone) {
+                  return (
+                    <p className="text-xs text-gray-700 mt-1 flex items-center justify-center gap-1 font-mono" title={phone}>
+                      <Phone size={12} className="text-gray-500 shrink-0" />
+                      {phone}
+                    </p>
+                  );
+                }
+                return null;
+              })()}
               {channel.id && (
                 <div className="mt-2 flex items-center justify-center gap-2 text-xs text-gray-500">
                   <span className="font-mono" title={channel.id}>

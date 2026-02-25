@@ -92,6 +92,8 @@ export class FlowBasedMessageRouter {
     // CRITICAL: if requestedChannelId is provided, DO NOT consider other channels.
     // This prevents cross-brand routing when multiple WhatsApp channels exist (e.g., PuntoNet vs Alfanet).
     // Fallback: if there are no flows for the requested channel, then consider any channel of this type.
+    // When a flow has multiple channels of the same type (e.g. two WhatsApp), we order by
+    // f.priority (flow priority) then fc.priority (channel priority within flow; lower = higher priority).
     const baseSelect = `SELECT DISTINCT
           f.*,
           l.provider as llm_provider,
@@ -99,7 +101,9 @@ export class FlowBasedMessageRouter {
           l.config as llm_config,
           c.channel_type,
           c.config as channel_config,
-          c.id as channel_config_id
+          c.id as channel_config_id,
+          f.priority as flow_priority,
+          fc.priority as channel_priority
         FROM orchestration_flows f
         JOIN llm_configs l ON f.llm_id = l.id
         JOIN flow_channels fc ON f.id = fc.flow_id AND fc.active = true
@@ -108,6 +112,7 @@ export class FlowBasedMessageRouter {
           AND f.active = true
           AND l.active = true
           AND c.is_active = true`;
+    const orderByFlowThenChannel = `ORDER BY flow_priority ASC, channel_priority ASC`;
 
     let result;
     if (requestedChannelId) {
@@ -115,7 +120,7 @@ export class FlowBasedMessageRouter {
       result = await this.db.query(
         `${baseSelect}
           AND c.id = $2::uuid
-        ORDER BY f.priority ASC`,
+        ${orderByFlowThenChannel}`,
         [message.channelType, requestedChannelId]
       );
 
@@ -124,18 +129,17 @@ export class FlowBasedMessageRouter {
           channelType: message.channelType,
           requestedChannelId,
         });
-        // Fallback pass: any channel of this type
         result = await this.db.query(
           `${baseSelect}
-          ORDER BY f.priority ASC`,
+          ${orderByFlowThenChannel}`,
           [message.channelType]
         );
       }
     } else {
-      // No explicit channel requested: any channel of this type
+      // No explicit channel requested: pick by flow priority then channel priority (no round-robin)
       result = await this.db.query(
         `${baseSelect}
-        ORDER BY f.priority ASC`,
+        ${orderByFlowThenChannel}`,
         [message.channelType]
       );
     }

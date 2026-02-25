@@ -93,15 +93,16 @@ export interface DocumentProcessingJob {
 
 /**
  * WhatsApp Sending Job
+ * When message.metadata.template is set (WhatsAppTemplatePayload), the adapter sends a template message (360dialog/Meta) instead of free text.
  */
 export interface WhatsAppSendingJob {
   userId: string;
   message: {
     channelUserId: string;
-    content: string; // Text body (or caption if media is present)
+    content: string; // Text body (or caption if media present); empty when sending template
     mediaUrl?: string; // Publicly accessible URL for media
     mediaType?: 'image' | 'video' | 'document';
-    metadata?: any;
+    metadata?: any; // may include template: { name, language, components } for 360dialog template send
   };
   channelConfig: {
     provider: 'ultramsg' | 'twilio' | '360dialog';

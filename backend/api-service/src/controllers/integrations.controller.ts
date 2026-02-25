@@ -6,6 +6,7 @@ import {
   ChannelType,
   createLogger,
   generateSessionId,
+  WhatsAppTemplatePayload,
 } from '@cortex/shared';
 import { getQueueManager, QueueName } from '@cortex/queue-service';
 
@@ -196,16 +197,18 @@ export class IntegrationsController {
       Body: {
         channelType: ChannelType;
         userId: string;
-        message?: string; // text or caption
+        message?: string; // text or caption (required when not using template)
         mediaUrl?: string; // if provided, send as media with caption
         mediaType?: 'image' | 'video' | 'document';
+        /** WhatsApp approved template (360dialog/Meta). When set, sends template instead of free text (e.g. outside 24h window). */
+        template?: WhatsAppTemplatePayload;
         envelope: ExternalContextEnvelope;
         conversationMetadata?: Record<string, any>;
       };
     }>,
     reply: FastifyReply
   ): Promise<void> {
-    const { channelType, userId, message, mediaUrl, mediaType, envelope, conversationMetadata } =
+    const { channelType, userId, message, mediaUrl, mediaType, template, envelope, conversationMetadata } =
       request.body || ({} as any);
 
     // Extract creditId from envelope.refs for correlation (Collect sends creditId here)
@@ -219,10 +222,28 @@ export class IntegrationsController {
       );
     }
 
+    const useTemplate = template?.name && template?.language;
     const hasMedia = !!mediaUrl;
     const captionText = (message || '').trim();
-    if (!hasMedia && captionText.length === 0) {
-      throw new AppError('VALIDATION_ERROR', 'message is required when mediaUrl is not provided', 400);
+
+    if (useTemplate) {
+      // Template mode: no message required (optional for audit). Media not supported with template in this flow.
+      if (hasMedia) {
+        throw new AppError(
+          'VALIDATION_ERROR',
+          'mediaUrl/mediaType cannot be used together with template. Use either template or text/media.',
+          400
+        );
+      }
+    } else {
+      // Text/media mode: require message or media
+      if (!hasMedia && captionText.length === 0) {
+        throw new AppError(
+          'VALIDATION_ERROR',
+          'message is required when template is not provided (or provide template.name and template.language for template send)',
+          400
+        );
+      }
     }
 
     if (hasMedia) {
@@ -274,13 +295,56 @@ export class IntegrationsController {
         }
       }
 
-      // Pick channelConfigId: request overrides, then conversation metadata, then any active WhatsApp channel
-      const channelConfigId =
-        (envelope.routing?.channelConfigId && isUuid(envelope.routing.channelConfigId)
-          ? envelope.routing.channelConfigId
-          : undefined) || (await this.getConversationChannelConfigId(conversationId));
+      // Resolve channel: flow-based (with balanceo when flow has multiple WhatsApp) or legacy fallback.
+      // Collect only needs to send flowId; channel is resolved from flow's channels (stickiness + round-robin).
+      const flowId =
+        (envelope.routing?.flowId && isUuid(envelope.routing.flowId)
+          ? envelope.routing.flowId
+          : null) ?? (await this.getConversationFlowId(conversationId));
 
-      const channelConfig = await this.getWhatsAppChannelConfig(channelConfigId);
+      let channelConfig: any;
+      let resolvedChannelConfigId: string | null = null;
+
+      if (flowId) {
+        const channelOverride =
+          envelope.routing?.channelConfigId && isUuid(envelope.routing.channelConfigId)
+            ? envelope.routing.channelConfigId
+            : undefined;
+        const resolved = await this.resolveChannelForFlowOutbound(
+          flowId,
+          conversationId,
+          channelOverride,
+          useTemplate ? '360dialog' : undefined
+        );
+        channelConfig = resolved.config;
+        resolvedChannelConfigId = resolved.channelConfigId;
+        if (useTemplate && channelConfig?.provider !== '360dialog') {
+          throw new AppError(
+            'VALIDATION_ERROR',
+            'Template messages are only supported with 360dialog. The selected channel is ' +
+              (channelConfig?.provider || 'unknown') +
+              '. Use a 360dialog channel (envelope.routing.channelConfigId) or a flow that has a 360dialog channel.',
+            400
+          );
+        }
+      } else {
+        // Legacy: no flow — use explicit channelConfigId or conversation's, then any active WhatsApp
+        const channelConfigId =
+          (envelope.routing?.channelConfigId && isUuid(envelope.routing.channelConfigId)
+            ? envelope.routing.channelConfigId
+            : undefined) || (await this.getConversationChannelConfigId(conversationId));
+        channelConfig = await this.getWhatsAppChannelConfig(channelConfigId);
+        resolvedChannelConfigId = channelConfigId ?? null;
+        if (useTemplate && channelConfig?.provider !== '360dialog') {
+          throw new AppError(
+            'VALIDATION_ERROR',
+            'Template messages are only supported with 360dialog. The selected channel is ' +
+              (channelConfig?.provider || 'unknown') +
+              '. Use envelope.routing.channelConfigId to specify a 360dialog channel.',
+            400
+          );
+        }
+      }
 
       logger.info('Integration outbound queued (pre-enqueue)', {
         channelType,
@@ -290,13 +354,16 @@ export class IntegrationsController {
         caseId: envelope.caseId,
         creditId,
         hasIdempotencyKey: !!idempotencyKey,
+        flowId: flowId || null,
         channelConfigSelected: {
+          resolvedChannelConfigId,
           requestedChannelConfigId: envelope.routing?.channelConfigId || null,
           conversationChannelConfigId: (await this.getConversationChannelConfigId(conversationId)) || null,
         },
         provider: channelConfig?.provider || 'ultramsg',
         hasMedia: !!mediaUrl,
         mediaType: mediaType || null,
+        template: useTemplate ? { name: template!.name, language: template!.language } : null,
       });
 
       // Verbose log: expose outbound message text only if explicitly enabled
@@ -317,18 +384,20 @@ export class IntegrationsController {
       await this.enqueueWhatsAppOutbound(
         normalizedUserId,
         conversationId,
-        captionText,
+        useTemplate ? '' : captionText,
         channelConfig,
-        hasMedia ? { mediaUrl: String(mediaUrl).trim(), mediaType } : undefined
+        hasMedia ? { mediaUrl: String(mediaUrl).trim(), mediaType } : undefined,
+        useTemplate ? template : undefined
       );
 
       // Persist outbound message in DB for audit/history + idempotency
-      await this.saveOutboundMessage(conversationId, captionText, {
+      await this.saveOutboundMessage(conversationId, useTemplate ? `[template:${template!.name}]` : captionText, {
         idempotencyKey,
         source: 'integration',
         namespace: envelope.namespace,
         caseId: envelope.caseId,
         media: hasMedia ? { mediaUrl: String(mediaUrl).trim(), mediaType } : undefined,
+        template: useTemplate ? template : undefined,
       });
 
       // Best-effort: update MCP context metadata for immediate availability (no effect if context not created yet)
@@ -520,6 +589,20 @@ export class IntegrationsController {
     }
   }
 
+  private async getConversationFlowId(conversationId: string): Promise<string | undefined> {
+    try {
+      const res = await this.db.query(
+        `SELECT flow_id FROM conversations WHERE id = $1`,
+        [conversationId]
+      );
+      const flowId = res.rows[0]?.flow_id;
+      if (typeof flowId === 'string' && isUuid(flowId)) return flowId;
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async getConversationChannelConfigId(conversationId: string): Promise<string | undefined> {
     try {
       const res = await this.db.query(`SELECT metadata FROM conversations WHERE id = $1`, [conversationId]);
@@ -530,6 +613,120 @@ export class IntegrationsController {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Get WhatsApp channels linked to a flow (flow_channels + channel_configs), ordered by fc.priority.
+   * When preferredProvider is set, only channels with that provider are returned (e.g. '360dialog' for template sends).
+   */
+  private async getWhatsAppChannelsForFlow(
+    flowId: string,
+    options?: { preferredProvider?: string }
+  ): Promise<Array<{ id: string; config: any }>> {
+    const providerFilter =
+      options?.preferredProvider ?
+        `AND (c.config->>'provider') = $2`
+      : '';
+    const params = options?.preferredProvider ? [flowId, options.preferredProvider] : [flowId];
+    const res = await this.db.query(
+      `
+      SELECT c.id, c.config
+      FROM flow_channels fc
+      JOIN channel_configs c ON fc.channel_id = c.id
+      WHERE fc.flow_id = $1 AND fc.active = true
+        AND c.channel_type = 'whatsapp' AND (c.is_active = true OR c.active = true)
+        ${providerFilter}
+      ORDER BY fc.priority ASC
+      `,
+      params
+    );
+    return res.rows.map((row: any) => ({ id: row.id, config: row.config }));
+  }
+
+  /**
+   * Resolve channel for outbound when using a flow: stickiness from conversation, optional override,
+   * or round-robin among the flow's WhatsApp channels. Persists selected channel to conversation for stickiness.
+   * When preferredProvider is set (e.g. '360dialog' for template messages), only channels of that provider are considered.
+   */
+  private async resolveChannelForFlowOutbound(
+    flowId: string,
+    conversationId: string,
+    optionalChannelOverride?: string,
+    preferredProvider?: string
+  ): Promise<{ channelConfigId: string; config: any }> {
+    const channels = await this.getWhatsAppChannelsForFlow(
+      flowId,
+      preferredProvider ? { preferredProvider } : undefined
+    );
+    if (channels.length === 0) {
+      throw new AppError(
+        'CONFIG_NOT_FOUND',
+        preferredProvider === '360dialog'
+          ? `Template messages require a 360dialog channel. This flow has no 360dialog channel. Add a 360dialog channel to the flow or use envelope.routing.channelConfigId to specify one.`
+          : `Flow has no active WhatsApp channels. Add at least one WhatsApp channel to the flow.`,
+        400
+      );
+    }
+
+    const channelIds = new Set(channels.map((c) => c.id));
+
+    // 1) Explicit override from request (e.g. Collect sends a specific channel)
+    if (optionalChannelOverride && isUuid(optionalChannelOverride) && channelIds.has(optionalChannelOverride)) {
+      const ch = channels.find((c) => c.id === optionalChannelOverride);
+      if (ch) return { channelConfigId: ch.id, config: ch.config };
+    }
+
+    // 2) Stickiness: conversation already has a channel that belongs to this flow
+    const existingChannelId = await this.getConversationChannelConfigId(conversationId);
+    if (existingChannelId && channelIds.has(existingChannelId)) {
+      const ch = channels.find((c) => c.id === existingChannelId);
+      if (ch) return { channelConfigId: ch.id, config: ch.config };
+    }
+
+    // 3) Single channel: use it and persist for stickiness
+    if (channels.length === 1) {
+      const ch = channels[0];
+      await this.persistConversationChannelConfigId(conversationId, ch.id);
+      return { channelConfigId: ch.id, config: ch.config };
+    }
+
+    // 4) Multiple channels: round-robin (counter 1 -> channel 0, counter 2 -> channel 1, ...)
+    const nextIndex = await this.advanceRoundRobinCounter(flowId);
+    const index = ((nextIndex - 1) % channels.length + channels.length) % channels.length;
+    const selected = channels[index];
+    await this.persistConversationChannelConfigId(conversationId, selected.id);
+    logger.info('Outbound channel selected by round-robin', {
+      flowId,
+      conversationId,
+      channelConfigId: selected.id,
+      channelIndex: index,
+      totalChannels: channels.length,
+    });
+    return { channelConfigId: selected.id, config: selected.config };
+  }
+
+  private async persistConversationChannelConfigId(
+    conversationId: string,
+    channelConfigId: string
+  ): Promise<void> {
+    await this.db.query(
+      `UPDATE conversations
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('channel_config_id', $1::text),
+           last_activity = NOW()
+       WHERE id = $2`,
+      [channelConfigId, conversationId]
+    );
+  }
+
+  private async advanceRoundRobinCounter(flowId: string): Promise<number> {
+    const res = await this.db.query(
+      `INSERT INTO outbound_channel_round_robin (flow_id, counter)
+       VALUES ($1, 1)
+       ON CONFLICT (flow_id) DO UPDATE SET counter = outbound_channel_round_robin.counter + 1, updated_at = NOW()
+       RETURNING counter`,
+      [flowId]
+    );
+    return Number(res.rows[0]?.counter ?? 0);
   }
 
   private async getWhatsAppChannelConfig(channelConfigId?: string): Promise<any> {
@@ -568,7 +765,8 @@ export class IntegrationsController {
     conversationId: string,
     content: string,
     channelConfig: any,
-    media?: { mediaUrl: string; mediaType?: 'image' | 'video' | 'document' }
+    media?: { mediaUrl: string; mediaType?: 'image' | 'video' | 'document' },
+    template?: WhatsAppTemplatePayload
   ): Promise<void> {
     const queueManager = getQueueManager();
 
@@ -589,7 +787,12 @@ export class IntegrationsController {
                 mediaType: media.mediaType,
               }
             : {}),
-          metadata: { outbound: true, conversationId, source: 'integration' },
+          metadata: {
+            outbound: true,
+            conversationId,
+            source: 'integration',
+            ...(template ? { template } : {}),
+          },
         },
         channelConfig: {
           provider,
@@ -615,6 +818,7 @@ export class IntegrationsController {
       namespace: string;
       caseId: string;
       media?: { mediaUrl: string; mediaType?: 'image' | 'video' | 'document' };
+      template?: WhatsAppTemplatePayload;
     }
   ): Promise<void> {
     try {
@@ -633,6 +837,7 @@ export class IntegrationsController {
             idempotencyKey: meta.idempotencyKey || null,
             external: { namespace: meta.namespace, caseId: meta.caseId },
             media: meta.media || null,
+            template: meta.template || null,
           }),
         ]
       );
