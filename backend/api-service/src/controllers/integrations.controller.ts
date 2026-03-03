@@ -346,6 +346,7 @@ export class IntegrationsController {
         }
       }
 
+      const pnId = channelConfig?.phoneNumberId != null ? String(channelConfig.phoneNumberId).trim() : '';
       logger.info('Integration outbound queued (pre-enqueue)', {
         channelType,
         userId: normalizedUserId,
@@ -361,6 +362,8 @@ export class IntegrationsController {
           conversationChannelConfigId: (await this.getConversationChannelConfigId(conversationId)) || null,
         },
         provider: channelConfig?.provider || 'ultramsg',
+        phoneNumberIdLength: pnId.length,
+        phoneNumberIdSuffix: pnId.length >= 4 ? pnId.slice(-4) : '(none)',
         hasMedia: !!mediaUrl,
         mediaType: mediaType || null,
         template: useTemplate ? { name: template!.name, language: template!.language } : null,
@@ -390,8 +393,12 @@ export class IntegrationsController {
         useTemplate ? template : undefined
       );
 
-      // Persist outbound message in DB for audit/history + idempotency
-      await this.saveOutboundMessage(conversationId, useTemplate ? `[template:${template!.name}]` : captionText, {
+      // Persist outbound message in DB for audit/history + idempotency.
+      // For templates we store a readable label (body text lives in Meta; we don't have it here).
+      const contentForHistory = useTemplate
+        ? `Plantilla enviada: ${template!.name} (${template!.language})`
+        : captionText;
+      await this.saveOutboundMessage(conversationId, contentForHistory, {
         idempotencyKey,
         source: 'integration',
         namespace: envelope.namespace,

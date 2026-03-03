@@ -152,7 +152,7 @@ export interface IChannelAdapter {
   readonly channelType: ChannelType;
 
   initialize(config: ChannelConfig): Promise<void>;
-  sendMessage(userId: string, message: OutgoingMessage): Promise<void>;
+  sendMessage(userId: string, message: OutgoingMessage): Promise<void | string | { externalMessageId: string; messageStatus?: string }>;
   receiveMessage(payload: any): NormalizedMessage;
   getSessionContext(userId: string): SessionContext;
   handleWebhook(payload: any): Promise<NormalizedMessage | null>;

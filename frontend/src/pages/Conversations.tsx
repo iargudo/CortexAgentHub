@@ -131,7 +131,7 @@ export function Conversations() {
 
   const conversations = data?.conversations || [];
   const pagination = data?.pagination || { total: 0, limit: 50, offset: 0, hasMore: false };
-  const statistics = data?.statistics || { totalMessages: 0, totalCost: 0 };
+  const statistics = data?.statistics || { totalMessages: 0, messagesSent: 0, messagesReceived: 0, totalCost: 0 };
 
   const formatDate = (dateString: string) => {
     if (!dateString) return 'N/A';
@@ -351,7 +351,7 @@ export function Conversations() {
       </div>
 
       {/* Statistics */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="bg-white rounded-lg shadow p-4">
           <div className="text-sm text-gray-600">Total Conversaciones</div>
           <div className="text-2xl font-bold text-gray-900">{pagination.total}</div>
@@ -363,15 +363,17 @@ export function Conversations() {
           </div>
         </div>
         <div className="bg-white rounded-lg shadow p-4">
-          <div className="text-sm text-gray-600">Total Mensajes</div>
-          <div className="text-2xl font-bold text-gray-900">
-            {statistics.totalMessages || conversations.reduce((sum: number, conv: Conversation) => sum + conv.messageCount, 0)}
-          </div>
+          <div className="text-sm text-gray-600">Mensajes enviados</div>
+          <div className="text-2xl font-bold text-gray-900">{statistics.messagesSent ?? 0}</div>
+        </div>
+        <div className="bg-white rounded-lg shadow p-4">
+          <div className="text-sm text-gray-600">Mensajes recibidos</div>
+          <div className="text-2xl font-bold text-gray-900">{statistics.messagesReceived ?? 0}</div>
         </div>
         <div className="bg-white rounded-lg shadow p-4">
           <div className="text-sm text-gray-600">Costo Total</div>
           <div className="text-2xl font-bold text-gray-900">
-            ${(statistics.totalCost || conversations.reduce((sum: number, conv: Conversation) => sum + conv.totalCost, 0)).toFixed(2)}
+            ${(statistics.totalCost ?? 0).toFixed(2)}
           </div>
         </div>
       </div>

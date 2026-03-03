@@ -994,6 +994,15 @@ Solución: Verificar que MCP Server esté corriendo y que la tool esté activa
 Solución: Verificar API keys y que el proveedor esté activo en llm_configs
 ```
 
+**5. Discrepancia entre mensajes en AgentHub y Meta/360dialog (ej. 688 vs 542)**
+
+AgentHub cuenta **todos** los mensajes del día en la tabla `messages` (user + assistant). Meta/360dialog solo reporta mensajes **enviados** por su API (y entregados). Para analizar una campaña en staging:
+
+- Ejecutar: `./deploy-docker-stg.sh analyze-campaign`
+- El script consulta la BD en Azure (mensajes hoy en zona Ecuador), desglosa por rol (user/assistant), por outbound (campaña/integración) y por canal, e indica cómo revisar logs de envío.
+
+Causas típicas de la diferencia: (1) mensajes **entrantes** (user) contados en AgentHub pero no en "enviados" de Meta; (2) otros canales (webchat, Telegram); (3) zona horaria (AgentHub = America/Guayaquil, Meta puede ser otra); (4) envíos por UltraMsg que no pasan por la API de Meta.
+
 ### Logs
 
 **Ubicación:**

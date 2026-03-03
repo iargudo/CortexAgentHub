@@ -91,19 +91,20 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
     userId: string, 
     message: OutgoingMessage,
     channelConfig?: WhatsAppConfig
-  ): Promise<void> {
+  ): Promise<string | { externalMessageId: string; messageStatus?: string } | undefined> {
     this.ensureInitialized();
 
     // Use provided channel config if available, otherwise use initialized config
     const configToUse = channelConfig || this.config;
 
     try {
+      let result: string | { externalMessageId: string; messageStatus?: string } | undefined;
       if (configToUse.provider === 'ultramsg') {
         await this.sendViaUltramsg(userId, message, configToUse);
       } else if (configToUse.provider === 'twilio') {
         await this.sendViaTwilio(userId, message, configToUse);
       } else if (configToUse.provider === '360dialog') {
-        await this.sendVia360dialog(userId, message, configToUse);
+        result = await this.sendVia360dialog(userId, message, configToUse);
       }
 
       this.logger.info(`Message sent to WhatsApp user: ${userId}`, {
@@ -111,6 +112,7 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
         instanceId: configToUse.instanceId,
         phoneNumberId: configToUse.phoneNumberId,
       });
+      return result;
     } catch (error: any) {
       this.logger.error(`Failed to send WhatsApp message to ${userId}`, {
         error: error.message,
@@ -381,11 +383,12 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
    * @param message - Message to send
    * @param config - WhatsApp configuration to use (defaults to initialized config)
    */
+  /** Result from 360dialog send: wamid and optional Meta message_status (accepted | held_for_quality_assessment). */
   private async sendVia360dialog(
     userId: string, 
     message: OutgoingMessage,
     config: WhatsAppConfig = this.config
-  ): Promise<void> {
+  ): Promise<{ externalMessageId: string; messageStatus?: string } | undefined> {
     // Create client with specific configuration if different from initialized
     let client = this.client;
     if (
@@ -499,18 +502,25 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
 
       // Log success if response indicates message was sent (accepted by Meta; delivery is separate)
       if (response.data && response.data.messages && response.data.messages.length > 0) {
-        const messageId = response.data.messages[0].id;
-        this.logger.info('Message sent successfully via 360dialog', {
-          phoneNumberId: config.phoneNumberId,
-          userId: formattedUserId,
-          messageId,
-        });
-        this.logger.warn(
-          '360dialog: HTTP 200 means "accepted", not "delivered". If message does not arrive on phone: ' +
-            'check (1) 24h window - free text only delivered if user messaged you in last 24h; ' +
-            '(2) use approved template when outside 24h; (3) webhook status updates for delivery/error codes.'
-        );
-        return; // Success
+        const msg = response.data.messages[0];
+        const messageId = msg.id;
+        const messageStatus = msg.message_status; // "accepted" | "held_for_quality_assessment" (template pacing)
+        if (messageStatus === 'held_for_quality_assessment') {
+          this.logger.warn('360dialog message held for quality assessment (template pacing); may be delivered later or dropped', {
+            phoneNumberId: config.phoneNumberId,
+            userId: formattedUserId,
+            messageId,
+            messageStatus,
+          });
+        } else {
+          this.logger.info('Message sent successfully via 360dialog', {
+            phoneNumberId: config.phoneNumberId,
+            userId: formattedUserId,
+            messageId,
+            messageStatus: messageStatus || 'accepted',
+          });
+        }
+        return { externalMessageId: messageId, messageStatus: messageStatus || 'accepted' };
       }
 
       // If we get here and no error was thrown, something unexpected happened
@@ -519,6 +529,7 @@ export class WhatsAppAdapter extends BaseChannelAdapter {
         userId: formattedUserId,
         responseData: response.data,
       });
+      return undefined;
     } catch (error: any) {
       const duration = Date.now() - startTime;
       let safePayloadPreview: unknown;

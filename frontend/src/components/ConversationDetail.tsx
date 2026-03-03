@@ -353,7 +353,7 @@ export function ConversationDetail({ conversationId }: ConversationDetailProps) 
                         {message.role === 'user' ? 'Usuario' : 'Asistente'}
                       </span>
                     </div>
-                    <div className="flex items-center gap-4 text-xs text-gray-500">
+                    <div className="flex items-center gap-4 text-xs text-gray-500 flex-wrap">
                       <span>{formatDate(message.timestamp)}</span>
                       {message.cost > 0 && (
                         <span className="flex items-center gap-1">
@@ -364,9 +364,60 @@ export function ConversationDetail({ conversationId }: ConversationDetailProps) 
                       {message.tokensUsed && message.tokensUsed.total && (
                         <span>{message.tokensUsed.total} tokens</span>
                       )}
+                      {message.metadata?.externalMessageId && (
+                        <span
+                          className="font-mono text-gray-400"
+                          title="ID del mensaje en Meta (wamid). Útil para correlacionar con errores en Meta Business."
+                        >
+                          wamid: {message.metadata.externalMessageId}
+                        </span>
+                      )}
+                      {message.metadata?.messageStatus === 'held_for_quality_assessment' && (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-amber-700 bg-amber-100"
+                          title="Meta aceptó el envío pero retuvo el mensaje (p. ej. límite de calidad/plantillas). Puede no llegar al destinatario."
+                        >
+                          Retenido por Meta
+                        </span>
+                      )}
+                      {message.metadata?.messageStatus === 'accepted' &&
+                        message.metadata?.externalMessageId &&
+                        message.metadata?.deliveryStatus !== 'failed' && (
+                        <span className="text-green-600" title="Meta aceptó el mensaje para envío.">
+                          Aceptado
+                        </span>
+                      )}
+                      {message.metadata?.deliveryStatus === 'failed' && (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-red-700 bg-red-100"
+                          title="Meta informó que el mensaje no fue entregado al destinatario."
+                        >
+                          No entregado
+                          {(() => {
+                            const code = message.metadata?.deliveryErrorCode;
+                            const hasCode = code != null && code !== '' && code !== 0;
+                            return hasCode ? ` (error ${code})` : '';
+                          })()}
+                        </span>
+                      )}
                     </div>
                   </div>
-                  <p className="text-sm text-gray-900 whitespace-pre-wrap">{message.content}</p>
+                  <p className="text-sm text-gray-900 whitespace-pre-wrap">
+                    {message.content?.startsWith('[template:') && message.content.endsWith(']')
+                      ? `Plantilla enviada: ${message.content.slice(10, -1)}`
+                      : message.content}
+                  </p>
+                  {message.metadata?.deliveryStatus === 'failed' && (
+                    <div className="mt-2 text-xs text-red-600">
+                      Meta no entregó este mensaje al destinatario
+                      {(() => {
+                        const code = message.metadata?.deliveryErrorCode;
+                        const hasCode = code != null && code !== '' && code !== 0;
+                        return hasCode ? ` (código ${code}). ` : '. ';
+                      })()}
+                      Puedes buscar el wamid en Meta Business para más detalle.
+                    </div>
+                  )}
                   {message.llmProvider && (
                     <div className="mt-2 text-xs text-gray-500">
                       <span>LLM: {message.llmProvider}</span>

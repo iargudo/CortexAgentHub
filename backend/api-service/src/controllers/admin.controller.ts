@@ -40,6 +40,19 @@ export class AdminController {
       );
       const totalMessages = parseInt(messagesResult.rows[0].total) || 0;
 
+      // Get messages sent (assistant) and received (user)
+      const sentReceivedResult = await this.db.query(`
+        SELECT role, COUNT(*) as count
+        FROM messages
+        GROUP BY role
+      `);
+      let messagesSent = 0;
+      let messagesReceived = 0;
+      sentReceivedResult.rows.forEach((row: any) => {
+        if (row.role === 'assistant') messagesSent = parseInt(row.count) || 0;
+        if (row.role === 'user') messagesReceived = parseInt(row.count) || 0;
+      });
+
       // Get active users in last 24 hours (Ecuador timezone UTC-5)
       // Convert timestamps to Ecuador timezone for comparison
       const activeUsersResult = await this.db.query(`
@@ -114,6 +127,8 @@ export class AdminController {
         overview: {
           totalConversations,
           totalMessages,
+          messagesSent,
+          messagesReceived,
           activeUsers24h,
           totalCost24h: parseFloat(totalCost24h.toFixed(2)),
         },
@@ -2180,11 +2195,13 @@ export class AdminController {
       const countResult = await this.db.query(countQuery, countParams);
       const total = parseInt(countResult.rows[0].total) || 0;
 
-      // Get total messages and total cost for all conversations matching the filters
+      // Get total messages, sent/received breakdown and total cost for all conversations matching the filters
       // This gives accurate totals regardless of pagination
       let statsQuery = `
         SELECT 
           COUNT(DISTINCT m.id) as total_messages,
+          COUNT(DISTINCT CASE WHEN m.role = 'user' THEN m.id END) as messages_received,
+          COUNT(DISTINCT CASE WHEN m.role = 'assistant' THEN m.id END) as messages_sent,
           COALESCE(SUM(m.cost), 0) as total_cost
         FROM conversations c
         LEFT JOIN messages m ON m.conversation_id = c.id
@@ -2248,6 +2265,8 @@ export class AdminController {
 
       const statsResult = await this.db.query(statsQuery, statsParams);
       const totalMessages = parseInt(statsResult.rows[0].total_messages) || 0;
+      const messagesSent = parseInt(statsResult.rows[0].messages_sent) || 0;
+      const messagesReceived = parseInt(statsResult.rows[0].messages_received) || 0;
       const totalCost = parseFloat(statsResult.rows[0].total_cost) || 0;
 
       reply.send({
@@ -2276,6 +2295,8 @@ export class AdminController {
           },
           statistics: {
             totalMessages,
+            messagesSent,
+            messagesReceived,
             totalCost,
           },
         },

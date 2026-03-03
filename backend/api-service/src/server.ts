@@ -28,7 +28,7 @@ import {
   KnowledgeBasesController,
 } from './controllers';
 import { IntegrationsController } from './controllers/integrations.controller';
-import { WorkerManager, DocumentProcessingWorker, WhatsAppWebhookIncomingWorker, getQueueManager } from '@cortex/queue-service';
+import { WorkerManager, DocumentProcessingWorker, WhatsAppWebhookIncomingWorker, getQueueManager, QueueName, type Job } from '@cortex/queue-service';
 
 /**
  * API Server
@@ -258,21 +258,20 @@ export class APIServer {
       secret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
     });
 
-    // Rate limiting (disabled in development)
-    // IMPORTANT: Exclude WebSocket upgrade requests from rate limiting
+    // Rate limiting (disabled in development). Staging typically uses NODE_ENV=production.
+    // Exclude WebSocket upgrade and integration outbound/send via allowList (plugin has no "skip" option).
     if (process.env.NODE_ENV === 'production') {
       await this.app.register(rateLimit, {
         max: parseInt(process.env.RATE_LIMIT_REQUESTS || '100'),
         timeWindow: (parseInt(process.env.RATE_LIMIT_WINDOW || '60') * 1000).toString(),
         redis: this.redis,
-        skip: (request: any) => {
-          // Skip rate limiting for WebSocket upgrade requests
-          const upgrade = request.headers?.upgrade;
-          const connection = request.headers?.connection;
-          return upgrade === 'websocket' || (connection && typeof connection === 'string' && connection.toLowerCase().includes('upgrade'));
+        allowList: (request: any) => {
+          if (request.headers?.upgrade === 'websocket' || (typeof request.headers?.connection === 'string' && request.headers.connection.toLowerCase().includes('upgrade'))) return true;
+          const path = ((request.url ?? request.routerPath ?? request.raw?.url) ?? '').split('?')[0].toLowerCase();
+          return path.includes('outbound/send');
         },
-      } as any);
-      logger.info('Rate limiting enabled (WebSocket upgrades excluded)');
+      });
+      logger.info('Rate limiting enabled (WebSocket and outbound/send excluded)');
     } else {
       logger.info('Rate limiting disabled (development mode)');
     }
@@ -1215,6 +1214,51 @@ export class APIServer {
           error: workerError.message,
         });
         this.workerManager = null;
+      }
+
+      // Persist WhatsApp wamid (externalMessageId) when a sending job completes
+      try {
+        queueManager.addCompletedHandler(QueueName.WHATSAPP_SENDING, async (job: Job) => {
+          const r = job.returnvalue as {
+            externalMessageId?: string;
+            conversationId?: string;
+            messageStatus?: string;
+          } | undefined;
+          const externalMessageId = r?.externalMessageId;
+          const conversationId = r?.conversationId;
+          const messageStatus = r?.messageStatus;
+          if (!externalMessageId || !conversationId) return;
+          const client = await this.db.connect();
+          try {
+            // Set externalMessageId and optionally messageStatus (accepted | held_for_quality_assessment)
+            const updateResult = await client.query(
+              `UPDATE messages
+               SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{externalMessageId}', to_jsonb($1::text))
+                 || CASE WHEN $3::text IS NOT NULL AND $3::text <> '' THEN jsonb_build_object('messageStatus', to_jsonb($3::text)) ELSE '{}'::jsonb END
+               WHERE id = (
+                 SELECT id FROM messages
+                 WHERE conversation_id = $2
+                   AND role = 'assistant'
+                   AND (metadata->>'outbound') = 'true'
+                   AND (metadata->>'externalMessageId') IS NULL
+                 ORDER BY "timestamp" DESC
+                 LIMIT 1
+               )`,
+              [externalMessageId, conversationId, messageStatus ?? null]
+            );
+            if (updateResult.rowCount && updateResult.rowCount > 0) {
+              logger.debug('Persisted externalMessageId for outbound message', {
+                conversationId,
+                externalMessageId,
+                ...(messageStatus ? { messageStatus } : {}),
+              });
+            }
+          } finally {
+            client.release();
+          }
+        });
+      } catch (handlerErr: any) {
+        logger.warn('Could not register WhatsApp sending completed handler', { error: handlerErr?.message });
       }
 
       // Document processing worker (optional; failure must not block WhatsApp webhook)

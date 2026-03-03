@@ -1,11 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/services/api';
 import {
-  Activity,
   MessageSquare,
   DollarSign,
   Users,
   Calendar,
+  Send,
+  Inbox,
 } from 'lucide-react';
 import {
   BarChart,
@@ -166,17 +167,24 @@ export function Dashboard() {
       change: '+12%',
     },
     {
-      title: 'Total Messages',
-      value: stats?.overview.totalMessages || 0,
-      icon: Activity,
+      title: 'Mensajes enviados',
+      value: stats?.overview.messagesSent ?? 0,
+      icon: Send,
       color: 'purple',
       change: '+8%',
+    },
+    {
+      title: 'Mensajes recibidos',
+      value: stats?.overview.messagesReceived ?? 0,
+      icon: Inbox,
+      color: 'green',
+      change: '+5%',
     },
     {
       title: 'Active Users (24h)',
       value: stats?.overview.activeUsers24h || 0,
       icon: Users,
-      color: 'green',
+      color: 'teal',
       change: '+5%',
     },
     {
@@ -237,7 +245,7 @@ export function Dashboard() {
       )}
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
         {statCards.map((stat) => {
           const Icon = stat.icon;
           return (

@@ -132,7 +132,7 @@ export abstract class BaseChannelAdapter implements IChannelAdapter {
   /**
    * Abstract methods that must be implemented by specific adapters
    */
-  abstract sendMessage(userId: string, message: OutgoingMessage): Promise<void>;
+  abstract sendMessage(userId: string, message: OutgoingMessage): Promise<void | string | { externalMessageId: string; messageStatus?: string }>;
   abstract receiveMessage(payload: any): NormalizedMessage;
   abstract handleWebhook(payload: any): Promise<NormalizedMessage | null>;
   abstract isHealthy(): Promise<boolean>;

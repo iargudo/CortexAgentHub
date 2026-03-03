@@ -21,12 +21,15 @@ export class WhatsAppSendingWorker extends BaseWorker<WhatsAppSendingJob> {
     const attemptNumber = job.attemptsMade + 1;
     const maxAttempts = job.opts.attempts || 5;
 
+    const pnId = channelConfig?.phoneNumberId != null ? String(channelConfig.phoneNumberId).trim() : '';
     logger.info('Processing WhatsApp message', {
       jobId: job.id,
       userId,
       attemptNumber,
       maxAttempts,
       messageLength: message.content?.length || 0,
+      phoneNumberIdLength: pnId.length,
+      phoneNumberIdSuffix: pnId.length >= 4 ? pnId.slice(-4) : '(none)',
     });
 
     try {
@@ -55,6 +58,8 @@ export class WhatsAppSendingWorker extends BaseWorker<WhatsAppSendingJob> {
       });
 
       // Send message (text or media with caption)
+      let externalMessageId: string | undefined;
+      let messageStatus: string | undefined;
       if (message.mediaUrl && message.mediaType) {
         logger.info('Sending WhatsApp media message', {
           jobId: job.id,
@@ -64,13 +69,23 @@ export class WhatsAppSendingWorker extends BaseWorker<WhatsAppSendingJob> {
         });
         await whatsappAdapter.sendMedia(userId, message.mediaUrl, message.mediaType, message.content || '');
       } else {
-      await whatsappAdapter.sendMessage(userId, message, adapterConfig);
+        const sendResult = await whatsappAdapter.sendMessage(userId, message, adapterConfig);
+        if (typeof sendResult === 'string') {
+          externalMessageId = sendResult;
+        } else if (sendResult && typeof sendResult === 'object' && 'externalMessageId' in sendResult) {
+          externalMessageId = sendResult.externalMessageId;
+          messageStatus = sendResult.messageStatus;
+        }
       }
+
+      const conversationId = message.metadata?.conversationId as string | undefined;
 
       logger.info('WhatsApp message sent successfully', {
         jobId: job.id,
         userId,
         attemptNumber,
+        ...(externalMessageId ? { externalMessageId } : {}),
+        ...(messageStatus ? { messageStatus } : {}),
       });
 
       return {
@@ -78,6 +93,9 @@ export class WhatsAppSendingWorker extends BaseWorker<WhatsAppSendingJob> {
         userId,
         attemptNumber,
         timestamp: new Date().toISOString(),
+        ...(externalMessageId ? { externalMessageId } : {}),
+        ...(conversationId ? { conversationId } : {}),
+        ...(messageStatus ? { messageStatus } : {}),
       };
     } catch (error: any) {
       const isRetryable = this.isRetryableError(error);

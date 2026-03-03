@@ -1,9 +1,11 @@
-import { Queue, QueueEvents } from 'bullmq';
+import { Queue, QueueEvents, Job } from 'bullmq';
 import { QueueConnection } from '../connection';
 import { QueueName, JobOptions } from '../jobs/types';
 import { createLogger } from '@cortex/shared';
 
 const logger = createLogger('QueueManager');
+
+export type CompletedJobHandler = (job: Job) => void | Promise<void>;
 
 /**
  * Queue Manager
@@ -12,6 +14,7 @@ const logger = createLogger('QueueManager');
 export class QueueManager {
   private queues: Map<QueueName, Queue> = new Map();
   private queueEvents: Map<QueueName, QueueEvents> = new Map();
+  private completedHandlers: Map<QueueName, CompletedJobHandler> = new Map();
   private connection = QueueConnection.getConnection();
 
   constructor() {
@@ -51,8 +54,19 @@ export class QueueManager {
         connection: this.connection,
       });
 
-      events.on('completed', ({ jobId }) => {
+      events.on('completed', async ({ jobId }) => {
         logger.debug(`Job completed in ${queueName}`, { jobId });
+        const handler = this.completedHandlers.get(queueName);
+        if (handler) {
+          try {
+            const job = await this.getJob(queueName, jobId);
+            if (job) await Promise.resolve(handler(job));
+          } catch (err: any) {
+            logger.error(`Completed handler failed for ${queueName} job ${jobId}`, {
+              error: err?.message,
+            });
+          }
+        }
       });
 
       events.on('failed', ({ jobId, failedReason }) => {
@@ -68,6 +82,15 @@ export class QueueManager {
 
       this.queueEvents.set(queueName, events);
     });
+  }
+
+  /**
+   * Register a handler to run when a job completes in the given queue.
+   * The handler receives the full job (with data and returnvalue).
+   */
+  addCompletedHandler(queueName: QueueName, handler: CompletedJobHandler): void {
+    this.completedHandlers.set(queueName, handler);
+    logger.debug(`Completed handler registered for ${queueName}`);
   }
 
   /**

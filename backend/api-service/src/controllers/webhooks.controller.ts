@@ -1738,12 +1738,33 @@ export class WebhooksController {
       const actualPayload = webhookBody?.body || webhookBody;
       const is360Dialog = actualPayload?.object === 'whatsapp_business_account' || webhookBody?.body?.object === 'whatsapp_business_account';
 
-      // 360Dialog: skip queue for status-only (read/delivered); no message to process
+      // 360Dialog: status-only events (read/delivered/failed) — process "failed" then ack
       if (is360Dialog) {
         const entry = actualPayload?.entry?.[0];
         const value = entry?.changes?.[0]?.value;
         if (value?.statuses && !value?.messages) {
-          logger.debug('360Dialog status update received (ignoring)', {
+          for (const s of value.statuses) {
+            if (s.status === 'failed' && s.id && this.db) {
+              const code = s.errors?.[0]?.code ?? null;
+              try {
+                const up = await this.db.query(
+                  `UPDATE messages
+                   SET metadata = metadata || jsonb_build_object('deliveryStatus', 'failed', 'deliveryErrorCode', to_jsonb(COALESCE($1::int, 0)))
+                   WHERE metadata->>'externalMessageId' = $2`,
+                  [code, s.id]
+                );
+                if (up.rowCount && up.rowCount > 0) {
+                  logger.info('Message delivery status updated to failed (Meta webhook)', {
+                    wamid: s.id,
+                    code,
+                  });
+                }
+              } catch (err: any) {
+                logger.warn('Failed to update message delivery status', { wamid: s.id, error: err?.message });
+              }
+            }
+          }
+          logger.debug('360Dialog status update received', {
             provider: '360dialog',
             statusCount: value.statuses.length,
             phoneNumberId: value?.metadata?.phone_number_id,

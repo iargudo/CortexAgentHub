@@ -3,6 +3,7 @@ export * from './connection';
 export * from './queues/QueueManager';
 export * from './workers';
 export * from './jobs/types';
+export type { Job } from 'bullmq';
 
 import { getQueueManager } from './queues/QueueManager';
 import { QueueConnection } from './connection';
