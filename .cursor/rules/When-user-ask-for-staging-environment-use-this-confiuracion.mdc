@@ -1,0 +1,22 @@
+---
+alwaysApply: true
+---
+
+Recursos Azure (staging)
+Recurso	Nombre / valor
+Resource Group	rg-cortexagenthub-stg-001
+Región	canadacentral
+Backend (App Service)	app-back-cortexagenthub-stg-001
+Frontend (App Service)	app-front-cortexagenthub-stg-001
+App Service Plan	plan-cortexagenthub-stg-001 (SKU B1, Linux)
+Container Registry (ACR)	acrcortexagenthubstg001 (Basic, admin-enabled)
+Redis Cache	redis-cortexagenthub-stg-001 (Basic, vm-size c0)
+URLs de los servicios
+Backend: https://app-back-cortexagenthub-stg-001.azurewebsites.net
+Frontend: https://app-front-cortexagenthub-stg-001.azurewebsites.net
+ACR: https://acrcortexagenthubstg001.azurecr.io
+Base de datos (PostgreSQL en Azure)
+Servidor: stg-cortexstorage-stg-001.postgres.database.azure.com:5432
+Base de datos: cortexagenthub
+Usuario: postgres
+Conexión: SSL obligatorio (sslmode=require). La BD ya existe en Azure; el script solo configura la conexión.
